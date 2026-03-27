@@ -1,0 +1,143 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Finder.Views.SettingsPage"
+             Title="Settings"
+             BackgroundColor="{StaticResource BackgroundColor}">
+
+    <ScrollView>
+        <StackLayout Padding="20,12" Spacing="0">
+
+            <!-- ── Current Config Summary ─────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}"
+                   BackgroundColor="{StaticResource PrimaryDarkColor}"
+                   Margin="0,0,0,12">
+                <StackLayout Spacing="4">
+                    <Label Text="CURRENT CONFIGURATION"
+                           FontSize="11" FontAttributes="Bold"
+                           TextColor="#90CAF9" Margin="0,0,0,4" />
+                    <Label Text="{Binding MaskedToken, StringFormat='Token: {0}'}"
+                           FontSize="13" TextColor="White" />
+                    <Label Text="{Binding ChatId, StringFormat='Chat ID: {0}'}"
+                           FontSize="13" TextColor="White" />
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Telegram Settings Card ──────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
+                <StackLayout Spacing="4">
+
+                    <Label Text="TELEGRAM SETTINGS"
+                           Style="{StaticResource SectionLabelStyle}" />
+
+                    <Label Text="Bot Token" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,8,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False" Margin="0,0,0,8">
+                        <Entry x:Name="entryBotToken"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="Telegram bot API token"
+                               Text="{Binding BotToken}"
+                               IsPassword="True" />
+                    </Frame>
+
+                    <Label Text="Chat ID" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,0,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False" Margin="0,0,0,8">
+                        <Entry x:Name="entryChatId"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="Your Telegram chat ID"
+                               Text="{Binding ChatId}"
+                               Keyboard="Numeric" />
+                    </Frame>
+
+                    <Label Text="Update Interval (ms)" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,0,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False">
+                        <Entry x:Name="entryInterval"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="e.g. 60000 for 1 minute"
+                               Text="{Binding Interval}"
+                               Keyboard="Numeric" />
+                    </Frame>
+
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Security Settings Card ──────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
+                <StackLayout Spacing="0">
+
+                    <Label Text="SECURITY"
+                           Style="{StaticResource SectionLabelStyle}" />
+
+                    <!-- Passcode at startup toggle -->
+                    <StackLayout Orientation="Horizontal" Margin="0,12,0,8">
+                        <StackLayout VerticalOptions="Center" HorizontalOptions="FillAndExpand">
+                            <Label Text="Require Passcode at Startup"
+                                   FontSize="14"
+                                   TextColor="{StaticResource TextPrimaryColor}" />
+                            <Label Text="Ask for passcode every time the app opens"
+                                   FontSize="12"
+                                   TextColor="{StaticResource TextLightColor}" />
+                        </StackLayout>
+                        <Switch x:Name="switchPasscodeAtStartup"
+                                IsToggled="{Binding IsPasscodeAtStartup, Mode=TwoWay}"
+                                OnColor="{StaticResource PrimaryColor}"
+                                VerticalOptions="Center" />
+                    </StackLayout>
+
+                    <BoxView HeightRequest="1"
+                             BackgroundColor="{StaticResource DividerColor}"
+                             Margin="0,4" />
+
+                    <!-- Biometric toggle -->
+                    <StackLayout Orientation="Horizontal" Margin="0,8,0,4">
+                        <StackLayout VerticalOptions="Center" HorizontalOptions="FillAndExpand">
+                            <Label Text="Biometric Authentication"
+                                   FontSize="14"
+                                   TextColor="{StaticResource TextPrimaryColor}" />
+                            <Label Text="Enable fingerprint or face unlock"
+                                   FontSize="12"
+                                   TextColor="{StaticResource TextLightColor}" />
+                        </StackLayout>
+                        <Switch x:Name="switchBiometricAuth"
+                                IsToggled="{Binding IsBiometricEnabled, Mode=TwoWay}"
+                                OnColor="{StaticResource PrimaryColor}"
+                                IsEnabled="{Binding IsBiometricAvailable}"
+                                VerticalOptions="Center" />
+                    </StackLayout>
+
+                    <Label Text="⚠ Biometric authentication is not available on this device."
+                           FontSize="12"
+                           TextColor="{StaticResource WarningColor}"
+                           IsVisible="{Binding IsBiometricAvailable,
+                               Converter={x:StaticResource InverseBoolConverter}}"
+                           Margin="0,4,0,0" />
+
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Activity Indicator ──────────────────────────────────── -->
+            <ActivityIndicator IsRunning="{Binding IsBusy}"
+                               IsVisible="{Binding IsBusy}"
+                               Color="{StaticResource PrimaryColor}"
+                               Margin="0,8" />
+
+            <!-- ── Save Button ─────────────────────────────────────────── -->
+            <Button Text="💾  Save Settings"
+                    Style="{StaticResource SuccessButtonStyle}"
+                    Command="{Binding SaveCommand}"
+                    Margin="0,8,0,24" />
+
+        </StackLayout>
+    </ScrollView>
+</ContentPage>

@@ -1,0 +1,160 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Finder.Views.PasscodePage"
+             Title="Secure Access"
+             BackgroundColor="{StaticResource BackgroundColor}">
+
+    <ContentPage.Content>
+        <ScrollView VerticalOptions="FillAndExpand">
+            <StackLayout Padding="24,32"
+                         Spacing="0"
+                         VerticalOptions="Center">
+
+                <!-- ── Icon & Title ─────────────────────────────────────── -->
+                <Label Text="🔒"
+                       FontSize="52"
+                       HorizontalOptions="Center"
+                       Margin="0,0,0,8" />
+
+                <Label Text="Enter Passcode"
+                       FontSize="22"
+                       FontAttributes="Bold"
+                       TextColor="{StaticResource TextPrimaryColor}"
+                       HorizontalOptions="Center"
+                       Margin="0,0,0,4" />
+
+                <Label Text="Access is protected by your 4-digit passcode"
+                       FontSize="13"
+                       TextColor="{StaticResource TextSecondaryColor}"
+                       HorizontalOptions="Center"
+                       HorizontalTextAlignment="Center"
+                       Margin="0,0,0,32" />
+
+                <!-- ── Dot Indicators ───────────────────────────────────── -->
+                <StackLayout Orientation="Horizontal"
+                             HorizontalOptions="Center"
+                             Spacing="16"
+                             Margin="0,0,0,32">
+
+                    <Label x:Name="dot1" Text="●"
+                           FontSize="30"
+                           TextColor="{Binding Dot1Color}" />
+                    <Label x:Name="dot2" Text="●"
+                           FontSize="30"
+                           TextColor="{Binding Dot2Color}" />
+                    <Label x:Name="dot3" Text="●"
+                           FontSize="30"
+                           TextColor="{Binding Dot3Color}" />
+                    <Label x:Name="dot4" Text="●"
+                           FontSize="30"
+                           TextColor="{Binding Dot4Color}" />
+                </StackLayout>
+
+                <!-- ── Lockout Message ─────────────────────────────────── -->
+                <Frame CornerRadius="10"
+                       BackgroundColor="#FFCDD2"
+                       Padding="12,10"
+                       Margin="0,0,0,16"
+                       IsVisible="{Binding HasLockoutMessage}"
+                       HasShadow="False">
+                    <Label Text="{Binding LockoutMessage}"
+                           TextColor="{StaticResource DangerColor}"
+                           FontSize="13"
+                           HorizontalTextAlignment="Center" />
+                </Frame>
+
+                <!-- ── Error Message ───────────────────────────────────── -->
+                <Label x:Name="lblError"
+                       Text=""
+                       TextColor="{StaticResource DangerColor}"
+                       FontSize="13"
+                       IsVisible="False"
+                       HorizontalOptions="Center"
+                       HorizontalTextAlignment="Center"
+                       Margin="0,0,0,12" />
+
+                <!-- ── Numpad Grid ─────────────────────────────────────── -->
+                <Grid x:Name="numPadGrid"
+                      RowSpacing="4"
+                      ColumnSpacing="4"
+                      HorizontalOptions="Center"
+                      IsEnabled="{Binding IsLockedOut, Converter={x:StaticResource InverseBoolConverter}}">
+
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Row 0 -->
+                    <Button Text="1" Grid.Row="0" Grid.Column="0" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="1" />
+                    <Button Text="2" Grid.Row="0" Grid.Column="1" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="2" />
+                    <Button Text="3" Grid.Row="0" Grid.Column="2" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="3" />
+
+                    <!-- Row 1 -->
+                    <Button Text="4" Grid.Row="1" Grid.Column="0" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="4" />
+                    <Button Text="5" Grid.Row="1" Grid.Column="1" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="5" />
+                    <Button Text="6" Grid.Row="1" Grid.Column="2" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="6" />
+
+                    <!-- Row 2 -->
+                    <Button Text="7" Grid.Row="2" Grid.Column="0" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="7" />
+                    <Button Text="8" Grid.Row="2" Grid.Column="1" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="8" />
+                    <Button Text="9" Grid.Row="2" Grid.Column="2" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="9" />
+
+                    <!-- Row 3: Biometric | 0 | Delete -->
+                    <Button x:Name="btnBiometric"
+                            Text="👁"
+                            Grid.Row="3" Grid.Column="0"
+                            Style="{StaticResource NumpadButtonStyle}"
+                            BackgroundColor="{StaticResource PrimaryLightColor}"
+                            TextColor="White"
+                            IsVisible="False"
+                            Clicked="OnBiometricClicked" />
+                    <Button Text="0" Grid.Row="3" Grid.Column="1" Style="{StaticResource NumpadButtonStyle}"
+                            Command="{Binding DigitCommand}" CommandParameter="0" />
+                    <Button Text="⌫"
+                            Grid.Row="3" Grid.Column="2"
+                            Style="{StaticResource NumpadButtonStyle}"
+                            BackgroundColor="{StaticResource DividerColor}"
+                            Command="{Binding DeleteCommand}" />
+                </Grid>
+
+                <!-- ── Action Buttons ──────────────────────────────────── -->
+                <StackLayout Spacing="8" Margin="0,24,0,0">
+
+                    <!-- Change Passcode (only when not app startup) -->
+                    <Button x:Name="btnChangePasscode"
+                            Text="Change Passcode"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            BackgroundColor="{StaticResource TextSecondaryColor}"
+                            Clicked="OnChangePasscodeClicked"
+                            IsVisible="False" />
+
+                    <!-- Exit button (shown during app startup lockout) -->
+                    <Button x:Name="btnExit"
+                            Text="Exit App"
+                            Style="{StaticResource DangerButtonStyle}"
+                            Clicked="OnExitClicked"
+                            IsVisible="False" />
+                </StackLayout>
+
+            </StackLayout>
+        </ScrollView>
+    </ContentPage.Content>
+</ContentPage>

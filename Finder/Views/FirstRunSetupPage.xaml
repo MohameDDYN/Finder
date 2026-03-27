@@ -1,0 +1,112 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Finder.Views.FirstRunSetupPage"
+             Title="Setup Finder"
+             BackgroundColor="{StaticResource BackgroundColor}">
+
+    <ScrollView>
+        <StackLayout Padding="24,20" Spacing="0">
+
+            <!-- ── Welcome Header ───────────────────────────────────────── -->
+            <Label Text="📍" FontSize="52" HorizontalOptions="Center" Margin="0,8,0,8" />
+
+            <Label Text="Welcome to Finder"
+                   FontSize="26"
+                   FontAttributes="Bold"
+                   TextColor="{StaticResource PrimaryColor}"
+                   HorizontalOptions="Center"
+                   Margin="0,0,0,6" />
+
+            <Label Text="Set up your Telegram bot to receive location updates."
+                   FontSize="14"
+                   TextColor="{StaticResource TextSecondaryColor}"
+                   HorizontalOptions="Center"
+                   HorizontalTextAlignment="Center"
+                   Margin="0,0,0,28" />
+
+            <!-- ── Telegram Settings Card ──────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}">
+                <StackLayout Spacing="4">
+
+                    <Label Text="TELEGRAM CONFIGURATION"
+                           Style="{StaticResource SectionLabelStyle}" />
+
+                    <!-- Bot Token -->
+                    <Label Text="Bot Token" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,8,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False" Margin="0,0,0,8">
+                        <Entry x:Name="entryBotToken"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="1234567890:ABCDEfghijk..."
+                               Text="{Binding BotToken}"
+                               Keyboard="Default" />
+                    </Frame>
+
+                    <!-- Chat ID -->
+                    <Label Text="Chat ID" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,0,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False" Margin="0,0,0,8">
+                        <Entry x:Name="entryChatId"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="e.g. -1001234567890"
+                               Text="{Binding ChatId}"
+                               Keyboard="Numeric" />
+                    </Frame>
+
+                    <!-- Interval -->
+                    <Label Text="Update Interval (milliseconds)" FontSize="13"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           Margin="0,0,0,2" />
+                    <Frame CornerRadius="8" Padding="12,8"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HasShadow="False">
+                        <Entry x:Name="entryInterval"
+                               Style="{StaticResource EntryStyle}"
+                               Placeholder="60000 = 1 minute"
+                               Text="{Binding Interval}"
+                               Keyboard="Numeric" />
+                    </Frame>
+
+                    <Label Text="Minimum recommended: 10000 ms (10 seconds)"
+                           FontSize="11"
+                           TextColor="{StaticResource TextLightColor}"
+                           Margin="4,2,0,0" />
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Info Card ────────────────────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}"
+                   BackgroundColor="#E3F2FD" Margin="0,4,0,12">
+                <StackLayout Spacing="4">
+                    <Label Text="ℹ️  How to get your credentials:"
+                           FontSize="13" FontAttributes="Bold"
+                           TextColor="{StaticResource PrimaryDarkColor}" />
+                    <Label Text="1. Open Telegram and search for @BotFather&#10;2. Send /newbot and follow the instructions&#10;3. Copy the API token provided&#10;4. Get your Chat ID from @userinfobot"
+                           FontSize="12"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           LineBreakMode="WordWrap" />
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Activity Indicator ──────────────────────────────────── -->
+            <ActivityIndicator IsRunning="{Binding IsBusy}"
+                               IsVisible="{Binding IsBusy}"
+                               Color="{StaticResource PrimaryColor}"
+                               Margin="0,8" />
+
+            <!-- ── Save Button ─────────────────────────────────────────── -->
+            <Button Text="✓  Complete Setup"
+                    Style="{StaticResource SuccessButtonStyle}"
+                    Command="{Binding SaveCommand}"
+                    Margin="0,8,0,24" />
+
+        </StackLayout>
+    </ScrollView>
+</ContentPage>

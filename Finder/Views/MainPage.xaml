@@ -1,0 +1,123 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Finder.Views.MainPage"
+             Title="Finder"
+             BackgroundColor="{StaticResource BackgroundColor}">
+
+    <ContentPage.ToolbarItems>
+        <ToolbarItem Text="⚙"
+                     Order="Primary"
+                     Priority="0"
+                     Clicked="OnSettingsToolbarClicked" />
+    </ContentPage.ToolbarItems>
+
+    <ScrollView>
+        <StackLayout Padding="20,16" Spacing="0">
+
+            <!-- ── Header Card ─────────────────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
+                <StackLayout Spacing="8">
+
+                    <!-- App icon row -->
+                    <StackLayout Orientation="Horizontal" HorizontalOptions="Center" Spacing="10">
+                        <Label Text="📍" FontSize="36" VerticalOptions="Center" />
+                        <Label Text="Finder"
+                               FontSize="28"
+                               FontAttributes="Bold"
+                               TextColor="{StaticResource PrimaryColor}"
+                               VerticalOptions="Center" />
+                    </StackLayout>
+
+                    <!-- Status indicator -->
+                    <Frame CornerRadius="20"
+                           Padding="12,6"
+                           BackgroundColor="{StaticResource BackgroundColor}"
+                           HorizontalOptions="Center"
+                           HasShadow="False">
+                        <Label x:Name="lblStatus"
+                               Text="{Binding StatusText}"
+                               TextColor="{Binding StatusColor}"
+                               FontSize="15"
+                               FontAttributes="Bold"
+                               HorizontalOptions="Center" />
+                    </Frame>
+
+                    <!-- Last update time -->
+                    <Label Text="{Binding LastUpdateText}"
+                           TextColor="{StaticResource TextLightColor}"
+                           FontSize="12"
+                           HorizontalOptions="Center" />
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Tracking Controls Card ─────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
+                <StackLayout Spacing="6">
+
+                    <Label Text="TRACKING CONTROLS"
+                           Style="{StaticResource SectionLabelStyle}"
+                           Margin="0,0,0,6" />
+
+                    <!-- Start button -->
+                    <Button x:Name="btnStart"
+                            Text="▶  Start Tracking"
+                            Style="{StaticResource SuccessButtonStyle}"
+                            Command="{Binding StartServiceCommand}"
+                            IsEnabled="{Binding IsServiceRunning, Converter={x:StaticResource InverseBoolConverter}}" />
+
+                    <!-- Stop button -->
+                    <Button x:Name="btnStop"
+                            Text="■  Stop Tracking"
+                            Style="{StaticResource DangerButtonStyle}"
+                            Command="{Binding StopServiceCommand}"
+                            IsEnabled="{Binding IsServiceRunning}" />
+
+                    <!-- Refresh status -->
+                    <Button Text="↻  Refresh Status"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            BackgroundColor="{StaticResource PrimaryLightColor}"
+                            Command="{Binding RefreshStatusCommand}" />
+
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Actions Card ───────────────────────────────────────── -->
+            <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
+                <StackLayout Spacing="6">
+
+                    <Label Text="ACTIONS"
+                           Style="{StaticResource SectionLabelStyle}"
+                           Margin="0,0,0,6" />
+
+                    <!-- Share location button -->
+                    <Button Text="📤  Share Current Location"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding ShareLocationCommand}" />
+
+                    <!-- View history button -->
+                    <Button Text="📅  Location History"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            BackgroundColor="{StaticResource TextSecondaryColor}"
+                            Command="{Binding ViewHistoryCommand}" />
+
+                </StackLayout>
+            </Frame>
+
+            <!-- ── Activity indicator ────────────────────────────────── -->
+            <ActivityIndicator IsRunning="{Binding IsBusy}"
+                               IsVisible="{Binding IsBusy}"
+                               Color="{StaticResource PrimaryColor}"
+                               Margin="0,8" />
+
+            <!-- ── Footer ─────────────────────────────────────────────── -->
+            <Label Text="Finder tracks your location and sends\nupdates to your Telegram bot."
+                   TextColor="{StaticResource TextLightColor}"
+                   FontSize="12"
+                   HorizontalOptions="Center"
+                   HorizontalTextAlignment="Center"
+                   Margin="0,16,0,8" />
+
+        </StackLayout>
+    </ScrollView>
+</ContentPage>

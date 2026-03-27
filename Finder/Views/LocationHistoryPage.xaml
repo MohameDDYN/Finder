@@ -1,0 +1,124 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Finder.Views.LocationHistoryPage"
+             Title="Location History"
+             BackgroundColor="{StaticResource BackgroundColor}">
+
+    <ContentPage.ToolbarItems>
+        <ToolbarItem Text="↻" Clicked="OnRefreshClicked" />
+    </ContentPage.ToolbarItems>
+
+    <Grid RowSpacing="0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ── Header Info ──────────────────────────────────────────────── -->
+        <Frame Grid.Row="0"
+               Style="{StaticResource CardFrameStyle}"
+               Margin="16,12,16,4">
+            <StackLayout Orientation="Horizontal" Spacing="12">
+                <Label Text="📅" FontSize="28" VerticalOptions="Center" />
+                <StackLayout VerticalOptions="Center" HorizontalOptions="FillAndExpand">
+                    <Label Text="Tracking History"
+                           FontSize="16" FontAttributes="Bold"
+                           TextColor="{StaticResource TextPrimaryColor}" />
+                    <Label Text="Tap a date to get a GeoJSON report via Telegram"
+                           FontSize="12"
+                           TextColor="{StaticResource TextSecondaryColor}" />
+                </StackLayout>
+            </StackLayout>
+        </Frame>
+
+        <!-- ── List / Empty State ───────────────────────────────────────── -->
+        <Grid Grid.Row="1" Padding="16,4,16,16">
+
+            <!-- Empty state -->
+            <StackLayout IsVisible="{Binding HasFiles,
+                             Converter={x:StaticResource InverseBoolConverter}}"
+                         VerticalOptions="Center"
+                         HorizontalOptions="Center"
+                         Spacing="12">
+                <Label Text="📂" FontSize="56" HorizontalOptions="Center" />
+                <Label Text="{Binding EmptyMessage}"
+                       FontSize="14"
+                       TextColor="{StaticResource TextSecondaryColor}"
+                       HorizontalOptions="Center"
+                       HorizontalTextAlignment="Center" />
+                <ActivityIndicator IsRunning="{Binding IsBusy}"
+                                   IsVisible="{Binding IsBusy}"
+                                   Color="{StaticResource PrimaryColor}" />
+            </StackLayout>
+
+            <!-- File list using CollectionView -->
+            <CollectionView x:Name="filesCollectionView"
+                            ItemsSource="{Binding Files}"
+                            IsVisible="{Binding HasFiles}"
+                            SelectionMode="None">
+
+                <CollectionView.ItemTemplate>
+                    <DataTemplate>
+                        <Frame Style="{StaticResource CardFrameStyle}"
+                               Margin="0,4">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Date icon -->
+                                <Frame Grid.Column="0"
+                                       CornerRadius="8"
+                                       BackgroundColor="{StaticResource PrimaryLightColor}"
+                                       Padding="10,8"
+                                       HasShadow="False"
+                                       VerticalOptions="Center">
+                                    <Label Text="📍"
+                                           FontSize="22"
+                                           HorizontalOptions="Center" />
+                                </Frame>
+
+                                <!-- Date info -->
+                                <StackLayout Grid.Column="1"
+                                             VerticalOptions="Center"
+                                             Spacing="2">
+                                    <Label Text="{Binding DisplayName}"
+                                           FontSize="15"
+                                           FontAttributes="Bold"
+                                           TextColor="{StaticResource TextPrimaryColor}" />
+                                    <Label Text="{Binding DayOfWeek}"
+                                           FontSize="12"
+                                           TextColor="{StaticResource TextSecondaryColor}" />
+                                </StackLayout>
+
+                                <!-- Get report button -->
+                                <Button Grid.Column="2"
+                                        Text="📊"
+                                        FontSize="18"
+                                        BackgroundColor="Transparent"
+                                        TextColor="{StaticResource PrimaryColor}"
+                                        WidthRequest="44"
+                                        HeightRequest="44"
+                                        Padding="0"
+                                        VerticalOptions="Center"
+                                        CommandParameter="{Binding .}"
+                                        Clicked="OnGetReportClicked" />
+                            </Grid>
+                        </Frame>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+
+            </CollectionView>
+
+            <!-- Loading indicator (overlaid on list) -->
+            <ActivityIndicator IsRunning="{Binding IsBusy}"
+                               IsVisible="{Binding IsBusy}"
+                               Color="{StaticResource PrimaryColor}"
+                               VerticalOptions="Start"
+                               Margin="0,8" />
+        </Grid>
+    </Grid>
+</ContentPage>
