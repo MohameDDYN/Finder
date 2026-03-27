@@ -6,42 +6,23 @@
              BackgroundColor="{StaticResource BackgroundColor}">
 
     <ContentPage.ToolbarItems>
-        <ToolbarItem Text="⚙"
-                     Order="Primary"
-                     Priority="0"
-                     Clicked="OnSettingsToolbarClicked" />
+        <ToolbarItem Text="⚙" Clicked="OnSettingsToolbarClicked" />
     </ContentPage.ToolbarItems>
 
     <ScrollView>
-        <StackLayout Padding="20,16" Spacing="0">
+        <StackLayout Padding="16,12" Spacing="0">
 
-            <!-- ── Header Card ─────────────────────────────────────────── -->
+            <!-- ── Status Card ────────────────────────────────────────── -->
             <Frame Style="{StaticResource CardFrameStyle}" Margin="0,0,0,12">
-                <StackLayout Spacing="8">
+                <StackLayout Spacing="6" HorizontalOptions="Center">
 
-                    <!-- App icon row -->
-                    <StackLayout Orientation="Horizontal" HorizontalOptions="Center" Spacing="10">
-                        <Label Text="📍" FontSize="36" VerticalOptions="Center" />
-                        <Label Text="Finder"
-                               FontSize="28"
-                               FontAttributes="Bold"
-                               TextColor="{StaticResource PrimaryColor}"
-                               VerticalOptions="Center" />
-                    </StackLayout>
+                    <Label Text="📍" FontSize="36" HorizontalOptions="Center" />
 
-                    <!-- Status indicator -->
-                    <Frame CornerRadius="20"
-                           Padding="12,6"
-                           BackgroundColor="{StaticResource BackgroundColor}"
-                           HorizontalOptions="Center"
-                           HasShadow="False">
-                        <Label x:Name="lblStatus"
-                               Text="{Binding StatusText}"
-                               TextColor="{Binding StatusColor}"
-                               FontSize="15"
-                               FontAttributes="Bold"
-                               HorizontalOptions="Center" />
-                    </Frame>
+                    <Label Text="{Binding StatusText}"
+                           TextColor="{Binding StatusColor}"
+                           FontSize="15"
+                           FontAttributes="Bold"
+                           HorizontalOptions="Center" />
 
                     <!-- Last update time -->
                     <Label Text="{Binding LastUpdateText}"
@@ -59,19 +40,27 @@
                            Style="{StaticResource SectionLabelStyle}"
                            Margin="0,0,0,6" />
 
-                    <!-- Start button -->
+                    <!--
+                        FIX: Removed IsEnabled="{Binding IsServiceRunning, Converter=...}"
+                        from Start button. Command.CanExecute is the ONLY mechanism
+                        controlling IsEnabled. Having both caused Xamarin.Forms to
+                        let CanExecuteChanged override the binding, permanently
+                        disabling the Stop button when IsBusy was briefly true.
+                    -->
                     <Button x:Name="btnStart"
                             Text="▶  Start Tracking"
                             Style="{StaticResource SuccessButtonStyle}"
-                            Command="{Binding StartServiceCommand}"
-                            IsEnabled="{Binding IsServiceRunning, Converter={x:StaticResource InverseBoolConverter}}" />
+                            Command="{Binding StartServiceCommand}" />
 
-                    <!-- Stop button -->
+                    <!--
+                        FIX: Removed IsEnabled="{Binding IsServiceRunning}" from
+                        Stop button. IsEnabled is now controlled exclusively by
+                        StopServiceCommand.CanExecute = () => IsServiceRunning.
+                    -->
                     <Button x:Name="btnStop"
                             Text="■  Stop Tracking"
                             Style="{StaticResource DangerButtonStyle}"
-                            Command="{Binding StopServiceCommand}"
-                            IsEnabled="{Binding IsServiceRunning}" />
+                            Command="{Binding StopServiceCommand}" />
 
                     <!-- Refresh status -->
                     <Button Text="↻  Refresh Status"
@@ -111,7 +100,7 @@
                                Margin="0,8" />
 
             <!-- ── Footer ─────────────────────────────────────────────── -->
-            <Label Text="Finder tracks your location and sends\nupdates to your Telegram bot."
+            <Label Text="Finder tracks your location and sends&#10;updates to your Telegram bot."
                    TextColor="{StaticResource TextLightColor}"
                    FontSize="12"
                    HorizontalOptions="Center"
