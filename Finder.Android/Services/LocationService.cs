@@ -8,14 +8,9 @@ using Xamarin.Essentials;
 using Xamarin.Forms;
 using Application = Android.App.Application;
 
-// Register this implementation with Xamarin.Forms DependencyService
 [assembly: Dependency(typeof(Finder.Droid.Services.LocationService))]
 namespace Finder.Droid.Services
 {
-    /// <summary>
-    /// Android implementation of ILocationService.
-    /// Starts/stops the BackgroundLocationService foreground service.
-    /// </summary>
     public class LocationService : ILocationService
     {
         private readonly Context _context;
@@ -27,7 +22,6 @@ namespace Finder.Droid.Services
             _serviceIntent = new Intent(_context, typeof(BackgroundLocationService));
         }
 
-        /// <summary>Starts the foreground location tracking service.</summary>
         public Task StartTracking()
         {
             try
@@ -37,7 +31,7 @@ namespace Finder.Droid.Services
                 else
                     _context.StartService(_serviceIntent);
 
-                // Persist running state so BootReceiver can restore it
+                // Write true here — OnStartCommand also writes true as a safety net
                 SetTrackingPreference(true);
 
                 return Task.CompletedTask;
@@ -48,15 +42,19 @@ namespace Finder.Droid.Services
             }
         }
 
-        /// <summary>Stops the foreground location tracking service.</summary>
         public Task StopTracking()
         {
             try
             {
-                // Signal the service that this is a user-requested stop (prevents auto-restart)
+                // Signal OnDestroy that this is a deliberate user stop
                 BackgroundLocationService.IsStoppingByUserRequest = true;
 
+                // Write false HERE — this is the authoritative write for the
+                // user-stop path. OnDestroy will also check the flag and write
+                // false too, but this ensures the preference is updated
+                // immediately and atomically with the user's intent.
                 SetTrackingPreference(false);
+
                 _context.StopService(_serviceIntent);
 
                 return Task.CompletedTask;
@@ -67,7 +65,8 @@ namespace Finder.Droid.Services
             }
             finally
             {
-                // Reset the flag after a short delay
+                // Reset the flag after a delay so OnDestroy's auto-restart
+                // logic has time to check it before it is cleared
                 Task.Delay(2000).ContinueWith(_ =>
                 {
                     BackgroundLocationService.IsStoppingByUserRequest = false;
@@ -75,23 +74,18 @@ namespace Finder.Droid.Services
             }
         }
 
-        /// <summary>Gets the last known or current GPS location.</summary>
         public async Task<Location> GetCurrentLocation()
         {
             try
             {
-                // Try last known location first (faster)
                 var location = await Geolocation.GetLastKnownLocationAsync();
-
                 if (location == null)
                 {
-                    // Fall back to fresh location request
                     var request = new GeolocationRequest(
                         GeolocationAccuracy.Medium,
                         TimeSpan.FromSeconds(10));
                     location = await Geolocation.GetLocationAsync(request);
                 }
-
                 return location;
             }
             catch (Exception ex)
@@ -101,7 +95,6 @@ namespace Finder.Droid.Services
             }
         }
 
-        /// <summary>Returns true if the background service is currently running.</summary>
         public Task<bool> IsTrackingActive()
         {
             var prefs = Android.Preferences.PreferenceManager
@@ -109,8 +102,6 @@ namespace Finder.Droid.Services
             bool isRunning = prefs.GetBoolean("is_tracking_service_running", false);
             return Task.FromResult(isRunning);
         }
-
-        // ── Helper ─────────────────────────────────────────────────────────
 
         private void SetTrackingPreference(bool running)
         {
