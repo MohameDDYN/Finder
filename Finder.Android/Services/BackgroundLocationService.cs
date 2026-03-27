@@ -7,6 +7,7 @@ using Android.App;
 using Android.Content;
 using Android.Locations;
 using Android.OS;
+using Android.Preferences;
 using AndroidX.Core.App;
 using Finder.Droid.Managers;
 using Finder.Models;
@@ -18,19 +19,19 @@ namespace Finder.Droid.Services
     [Service(ForegroundServiceType = Android.Content.PM.ForegroundService.TypeLocation)]
     public class BackgroundLocationService : Service, ILocationListener
     {
-        // ── Static flag: set to true when user explicitly stops tracking ───
+        // ── Static flag: true only when user explicitly presses Stop ─────────
         public static bool IsStoppingByUserRequest = false;
 
-        // ── Notification constants ─────────────────────────────────────────
+        // ── Constants ────────────────────────────────────────────────────────
         public const int SERVICE_NOTIFICATION_ID = 1001;
         private const string NOTIFICATION_CHANNEL_ID = "finder_location_channel";
+        private const string PREF_KEY_RUNNING = "is_tracking_service_running";
 
-        // ── Adaptive update intervals ──────────────────────────────────────
         private const int STATIONARY_UPDATE_INTERVAL_MS = 60000;
         private const int MOVING_UPDATE_INTERVAL_MS = 20000;
         private const float SIGNIFICANT_MOVEMENT_METERS = 25f;
 
-        // ── State ──────────────────────────────────────────────────────────
+        // ── State ─────────────────────────────────────────────────────────────
         private AndroidLocation _lastSignificantLocation;
         private int _currentUpdateInterval = STATIONARY_UPDATE_INTERVAL_MS;
         private LocationManager _locationManager;
@@ -42,16 +43,19 @@ namespace Finder.Droid.Services
         private bool _isProcessingLocation = false;
         private int _updateCounter = 0;
 
-        // ── Dependencies ───────────────────────────────────────────────────
+        // ── Dependencies ──────────────────────────────────────────────────────
         private GeoJsonManager _geoJsonManager;
         private TelegramCommandHandler _commandHandler;
         private IntervalUpdateReceiver _intervalUpdateReceiver;
 
-        // ── Telegram credentials ───────────────────────────────────────────
+        // ── Credentials ───────────────────────────────────────────────────────
         private string _telegramBotToken;
         private string _chatId;
         private string _interval;
 
+        // settingsFilePath — the single JSON file shared between the UI layer
+        // (SettingsViewModel, FirstRunSetupViewModel) and all Android components.
+        // Every component that needs Telegram credentials reads from this exact path.
         private readonly string _settingsFilePath;
 
         public BackgroundLocationService()
@@ -63,12 +67,12 @@ namespace Finder.Droid.Services
 
         public override IBinder OnBind(Intent intent) => null;
 
-        // ── Service lifecycle ──────────────────────────────────────────────
+        // ── Service lifecycle ─────────────────────────────────────────────────
 
-        public override StartCommandResult OnStartCommand(Intent intent, StartCommandFlags flags, int startId)
+        public override StartCommandResult OnStartCommand(
+            Intent intent, StartCommandFlags flags, int startId)
         {
-            // Always mark as running when service starts —
-            // covers normal start AND auto-restart via BootReceiver
+            // Always write true — covers normal start AND BootReceiver restart after reboot.
             SetRunningPreference(true);
 
             LoadSettings();
@@ -93,8 +97,8 @@ namespace Finder.Droid.Services
 
             CreateNotificationChannel();
 
-            var notification = BuildNotification("Finder is active", "Initializing GPS…");
-            StartForeground(SERVICE_NOTIFICATION_ID, notification);
+            StartForeground(SERVICE_NOTIFICATION_ID,
+                BuildNotification("Finder is active", "Initializing GPS…"));
 
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -109,28 +113,26 @@ namespace Finder.Droid.Services
 
         public override void OnDestroy()
         {
-            // ── FIX: Issue 1 & Issue 2 ────────────────────────────────────
-            // Only write "false" to SharedPreferences when the user explicitly
-            // pressed the Stop button (IsStoppingByUserRequest == true).
+            // ── FIX: Issue 1 & Issue 2 ────────────────────────────────────────
             //
-            // If we write false unconditionally here, two things break:
+            // DO NOT write false unconditionally here. Two things break if you do:
             //
-            //   Issue 1 (reboot): Phone shutdown triggers OnDestroy →
-            //     writes false → BootReceiver reads false after reboot →
-            //     service never auto-restarts. ❌
+            //   Issue 1 (reboot): Phone shuts down → OnDestroy fires →
+            //     false written to SharedPreferences → BootReceiver reads false
+            //     after reboot → service never restarts automatically. ❌
             //
-            //   Issue 2 (button disabled): Closing the app triggers OnDestroy →
-            //     writes false → UI reads false on reopen → Stop button is
+            //   Issue 2 (Stop button disabled): App is closed → OnDestroy fires →
+            //     false written → UI reads false on reopen → Stop button is
             //     disabled even though the service is still running. ❌
             //
-            // LocationService.StopTracking() already writes false BEFORE
-            // calling StopService(), so no write is needed here for the
-            // user-stop path.
+            // LocationService.StopTracking() already writes false BEFORE calling
+            // StopService(), so no write is needed here for the user-stop path.
+            // The guard below makes OnDestroy's write conditional.
             if (IsStoppingByUserRequest)
             {
                 SetRunningPreference(false);
             }
-            // ─────────────────────────────────────────────────────────────
+            // ─────────────────────────────────────────────────────────────────
 
             base.OnDestroy();
 
@@ -165,20 +167,19 @@ namespace Finder.Droid.Services
             _httpClient?.Dispose();
             _httpClient = null;
 
-            // Auto-restart only if this was NOT a user-requested stop
+            // Auto-restart only when NOT stopped by the user
             if (!IsStoppingByUserRequest)
             {
-                var intent = new Intent(ApplicationContext, typeof(BackgroundLocationService));
-                StartService(intent);
+                var restartIntent = new Intent(ApplicationContext, typeof(BackgroundLocationService));
+                StartService(restartIntent);
             }
         }
 
-        // ── GPS location updates ───────────────────────────────────────────
+        // ── GPS ───────────────────────────────────────────────────────────────
 
         private void StartLocationUpdates()
         {
             if (_locationManager == null) return;
-
             if (CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation)
                 != Android.Content.PM.Permission.Granted) return;
 
@@ -212,8 +213,10 @@ namespace Finder.Droid.Services
                 _isProcessingLocation = true;
                 AcquireWakeLock();
 
-                string lat = location.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                string lon = location.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string lat = location.Latitude.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
+                string lon = location.Longitude.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
                 _currentLocation = $"{lat},{lon}";
 
                 _ = Task.Run(() =>
@@ -224,8 +227,8 @@ namespace Finder.Droid.Services
 
                 if (_lastSignificantLocation != null)
                 {
-                    float distance = location.DistanceTo(_lastSignificantLocation);
-                    int newInterval = distance > SIGNIFICANT_MOVEMENT_METERS
+                    float dist = location.DistanceTo(_lastSignificantLocation);
+                    int newInterval = dist > SIGNIFICANT_MOVEMENT_METERS
                         ? MOVING_UPDATE_INTERVAL_MS
                         : STATIONARY_UPDATE_INTERVAL_MS;
 
@@ -249,11 +252,15 @@ namespace Finder.Droid.Services
             }
         }
 
-        public void OnProviderEnabled(string provider) => UpdateNotification("Finder is active", "GPS enabled");
-        public void OnProviderDisabled(string provider) => UpdateNotification("Finder is active", "GPS disabled — waiting…");
+        public void OnProviderEnabled(string provider) =>
+            UpdateNotification("Finder is active", "GPS enabled");
+
+        public void OnProviderDisabled(string provider) =>
+            UpdateNotification("Finder is active", "GPS disabled — waiting…");
+
         public void OnStatusChanged(string provider, Availability status, Bundle extras) { }
 
-        // ── Telegram timer ─────────────────────────────────────────────────
+        // ── Telegram timer ────────────────────────────────────────────────────
 
         private void InitializeTelegramTimer()
         {
@@ -309,8 +316,6 @@ namespace Finder.Droid.Services
             }
         }
 
-        // ── Update interval from broadcast ─────────────────────────────────
-
         public void UpdateInterval(int newIntervalMs)
         {
             try
@@ -325,17 +330,17 @@ namespace Finder.Droid.Services
                 }
 
                 InitializeTelegramTimer();
-                UpdateNotification("Finder is active", $"Interval updated to {newIntervalMs} ms");
+                UpdateNotification("Finder is active",
+                    $"Interval updated to {newIntervalMs} ms");
             }
             catch { /* Silent fail */ }
         }
 
-        // ── Daily GeoJSON report ───────────────────────────────────────────
+        // ── Daily GeoJSON report ──────────────────────────────────────────────
 
         private void SetupDailyGeoJsonTimer()
         {
-            var now = DateTime.Now;
-            var timeUntilMidnight = now.Date.AddDays(1) - now;
+            var timeUntilMidnight = DateTime.Now.Date.AddDays(1) - DateTime.Now;
 
             _dailyGeoJsonTimer = new Timer(timeUntilMidnight.TotalMilliseconds);
             _dailyGeoJsonTimer.Elapsed += DailyGeoJsonTimer_Elapsed;
@@ -359,28 +364,33 @@ namespace Finder.Droid.Services
 
         private async Task SendDailyReportAsync(DateTime date)
         {
-            if (string.IsNullOrEmpty(_telegramBotToken) || string.IsNullOrEmpty(_chatId)) return;
+            if (string.IsNullOrEmpty(_telegramBotToken) ||
+                string.IsNullOrEmpty(_chatId)) return;
 
             try
             {
                 string geoJson = await _geoJsonManager.GenerateGeoJsonForDate(date);
                 if (string.IsNullOrEmpty(geoJson))
                 {
-                    await SendMessageToTelegramAsync($"No location data for {date:yyyy-MM-dd}");
+                    await SendMessageToTelegramAsync(
+                        $"No location data for {date:yyyy-MM-dd}");
                     return;
                 }
 
                 string tempFile = Path.Combine(
-                    Path.GetTempPath(), $"finder_report_{date:yyyy-MM-dd}.geojson");
+                    Path.GetTempPath(),
+                    $"finder_report_{date:yyyy-MM-dd}.geojson");
+
                 await File.WriteAllTextAsync(tempFile, geoJson);
-                await SendFileToTelegramAsync(tempFile, $"📊 Daily report — {date:yyyy-MM-dd}");
+                await SendFileToTelegramAsync(tempFile,
+                    $"📊 Daily report — {date:yyyy-MM-dd}");
 
                 if (File.Exists(tempFile)) File.Delete(tempFile);
             }
             catch { /* Silent fail */ }
         }
 
-        // ── Telegram API calls ─────────────────────────────────────────────
+        // ── Telegram API ──────────────────────────────────────────────────────
 
         private async Task SendLocationToTelegramAsync()
         {
@@ -389,30 +399,32 @@ namespace Finder.Droid.Services
                 string[] coords = _currentLocation.Split(',');
                 if (coords.Length != 2) return;
 
-                if (!double.TryParse(coords[0], System.Globalization.NumberStyles.Any,
+                if (!double.TryParse(coords[0],
+                        System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out double lat) ||
-                    !double.TryParse(coords[1], System.Globalization.NumberStyles.Any,
+                    !double.TryParse(coords[1],
+                        System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out double lon)) return;
 
-                string url = $"https://api.telegram.org/bot{_telegramBotToken}" +
-                             $"/sendLocation?chat_id={_chatId}" +
-                             $"&latitude={lat.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
-                             $"&longitude={lon.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
-
-                await _httpClient.GetAsync(url);
+                await _httpClient.GetAsync(
+                    $"https://api.telegram.org/bot{_telegramBotToken}" +
+                    $"/sendLocation?chat_id={_chatId}" +
+                    $"&latitude={lat.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                    $"&longitude={lon.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
             }
             catch { /* Silent fail */ }
         }
 
         private async Task SendMessageToTelegramAsync(string message)
         {
-            if (string.IsNullOrEmpty(_telegramBotToken) || string.IsNullOrEmpty(_chatId)) return;
+            if (string.IsNullOrEmpty(_telegramBotToken) ||
+                string.IsNullOrEmpty(_chatId)) return;
             try
             {
-                string url = $"https://api.telegram.org/bot{_telegramBotToken}" +
-                             $"/sendMessage?chat_id={_chatId}" +
-                             $"&text={Uri.EscapeDataString(message)}";
-                await _httpClient.GetAsync(url);
+                await _httpClient.GetAsync(
+                    $"https://api.telegram.org/bot{_telegramBotToken}" +
+                    $"/sendMessage?chat_id={_chatId}" +
+                    $"&text={Uri.EscapeDataString(message)}");
             }
             catch { /* Silent fail */ }
         }
@@ -433,14 +445,18 @@ namespace Finder.Droid.Services
                     form.Add(new StringContent(caption), "caption");
 
                     await _httpClient.PostAsync(
-                        $"https://api.telegram.org/bot{_telegramBotToken}/sendDocument", form);
+                        $"https://api.telegram.org/bot{_telegramBotToken}/sendDocument",
+                        form);
                 }
             }
             catch { /* Silent fail */ }
         }
 
-        // ── Settings ───────────────────────────────────────────────────────
+        // ── Settings ──────────────────────────────────────────────────────────
 
+        // Reads from _settingsFilePath — the same JSON file the UI layer writes to.
+        // This is the key lesson from FindMe: every component must read/write
+        // from this exact same path to stay in sync.
         private void LoadSettings()
         {
             try
@@ -457,12 +473,13 @@ namespace Finder.Droid.Services
                     return;
                 }
             }
-            catch { /* Fall through */ }
+            catch { /* Fall through to defaults */ }
 
             _telegramBotToken = null;
             _chatId = null;
             _interval = "60000";
-            UpdateNotification("Finder — Not configured", "Open app to add Telegram credentials");
+            UpdateNotification("Finder — Not configured",
+                "Open app to add Telegram credentials");
         }
 
         private AppSettings LoadSettingsFromFile()
@@ -479,11 +496,16 @@ namespace Finder.Droid.Services
 
         private void SaveSettingsToFile(AppSettings settings)
         {
-            try { File.WriteAllText(_settingsFilePath, JsonConvert.SerializeObject(settings)); }
+            try
+            {
+                File.WriteAllText(
+                    _settingsFilePath,
+                    JsonConvert.SerializeObject(settings));
+            }
             catch { /* Silent fail */ }
         }
 
-        // ── Notification helpers ───────────────────────────────────────────
+        // ── Notification ──────────────────────────────────────────────────────
 
         private void CreateNotificationChannel()
         {
@@ -505,7 +527,7 @@ namespace Finder.Droid.Services
         {
             var intent = new Intent(this, typeof(MainActivity));
             intent.SetFlags(ActivityFlags.ClearTop | ActivityFlags.SingleTop);
-            var pendingIntent = PendingIntent.GetActivity(
+            var pending = PendingIntent.GetActivity(
                 this, 0, intent, PendingIntentFlags.Immutable);
 
             return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
@@ -513,7 +535,7 @@ namespace Finder.Droid.Services
                 .SetContentText(text)
                 .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
                 .SetOngoing(true)
-                .SetContentIntent(pendingIntent)
+                .SetContentIntent(pending)
                 .Build();
         }
 
@@ -527,7 +549,7 @@ namespace Finder.Droid.Services
             catch { /* Silent fail */ }
         }
 
-        // ── Wake lock helpers ──────────────────────────────────────────────
+        // ── Wake lock ─────────────────────────────────────────────────────────
 
         private void AcquireWakeLock()
         {
@@ -546,13 +568,16 @@ namespace Finder.Droid.Services
                 _wakeLock.Release();
         }
 
-        // ── Utility helpers ────────────────────────────────────────────────
+        // ── Helpers ───────────────────────────────────────────────────────────
 
+        // SetRunningPreference uses PreferenceManager.GetDefaultSharedPreferences
+        // with PREF_KEY_RUNNING — identical to what LocationService and BootReceiver
+        // use. This is the three-component chain that must stay consistent.
         private void SetRunningPreference(bool running)
         {
-            var prefs = Android.Preferences.PreferenceManager.GetDefaultSharedPreferences(this);
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
             var editor = prefs.Edit();
-            editor.PutBoolean("is_tracking_service_running", running);
+            editor.PutBoolean(PREF_KEY_RUNNING, running);
             editor.Apply();
         }
 
@@ -579,7 +604,7 @@ namespace Finder.Droid.Services
         }
     }
 
-    // ── Broadcast receiver for dynamic interval updates ────────────────────
+    // ── Broadcast receiver for dynamic interval updates ───────────────────────
     public class IntervalUpdateReceiver : BroadcastReceiver
     {
         private readonly BackgroundLocationService _service;
@@ -592,10 +617,7 @@ namespace Finder.Droid.Services
         public override void OnReceive(Context context, Intent intent)
         {
             if (intent?.Action == "com.finder.UPDATE_INTERVAL")
-            {
-                int newInterval = intent.GetIntExtra("new_interval", 60000);
-                _service.UpdateInterval(newInterval);
-            }
+                _service.UpdateInterval(intent.GetIntExtra("new_interval", 60000));
         }
     }
 }

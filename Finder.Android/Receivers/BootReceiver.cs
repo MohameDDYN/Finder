@@ -6,10 +6,6 @@ using Finder.Droid.Services;
 
 namespace Finder.Droid.Receivers
 {
-    /// <summary>
-    /// Listens for the BOOT_COMPLETED broadcast and restarts
-    /// BackgroundLocationService if it was running before the reboot.
-    /// </summary>
     [BroadcastReceiver(Enabled = true, Exported = true)]
     [IntentFilter(new[] { Intent.ActionBootCompleted })]
     public class BootReceiver : BroadcastReceiver
@@ -18,12 +14,15 @@ namespace Finder.Droid.Receivers
         {
             if (intent?.Action != Intent.ActionBootCompleted) return;
 
-            // Check if tracking was active before the reboot
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(context);
-            bool wasRunning = prefs.GetBoolean("is_tracking_service_running", false);
+            // Read the same key that BackgroundLocationService and LocationService write to.
+            // Must use PreferenceManager.GetDefaultSharedPreferences — identical to the other two files.
+            var preferences = PreferenceManager.GetDefaultSharedPreferences(context);
+            bool wasRunning = preferences.GetBoolean("is_tracking_service_running", false);
 
             if (!wasRunning) return;
 
+            // typeof(BackgroundLocationService) resolves correctly because of
+            // the "using Finder.Droid.Services" directive above.
             var serviceIntent = new Intent(context, typeof(BackgroundLocationService));
 
             if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
