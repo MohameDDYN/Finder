@@ -22,7 +22,28 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
-		<!-- Boot receiver — restarts the service after device reboot -->
+		<!--
+            Layer 4: Watchdog periodic job.
+            android:permission is REQUIRED — JobScheduler will refuse to bind without it.
+        -->
+		<service
+            android:name=".Services.WatchdogJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:enabled="true"
+            android:exported="true" />
+
+		<!--
+            Layer 3: Receives the AlarmManager broadcast from OnTaskRemoved.
+            android:exported="false" — only our own app sends this intent.
+        -->
+		<receiver
+            android:name=".Receivers.RestartReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+		<!--
+            Layer 5: Restarts the service after phone reboot.
+        -->
 		<receiver
             android:name=".Receivers.BootReceiver"
             android:enabled="true"
@@ -45,20 +66,16 @@
 
 	<!-- Foreground service -->
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+	<uses-permission android:name="android.permission.INSTANT_APP_FOREGROUND_SERVICE" />
 
 	<!-- Wake lock -->
 	<uses-permission android:name="android.permission.WAKE_LOCK" />
 
-	<!-- Required for BootReceiver to fire after reboot -->
+	<!-- Boot completed — required for BootReceiver AND JobScheduler SetPersisted(true) -->
 	<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
 	<!-- Biometric -->
 	<uses-permission android:name="android.permission.USE_FINGERPRINT" />
 	<uses-permission android:name="android.permission.USE_BIOMETRIC" />
-
-	<!-- Storage -->
-	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 
 </manifest>

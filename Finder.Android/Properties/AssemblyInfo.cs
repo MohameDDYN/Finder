@@ -14,7 +14,16 @@ using Android.App;
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
 
-// Required Android permissions declared at assembly level
+// ── Normal permissions (granted at install time, no runtime dialog) ───────────
 [assembly: UsesPermission(Android.Manifest.Permission.Internet)]
-[assembly: UsesPermission(Android.Manifest.Permission.WriteExternalStorage)]
-[assembly: UsesPermission(Android.Manifest.Permission.ReadExternalStorage)]
+[assembly: UsesPermission(Android.Manifest.Permission.AccessNetworkState)]
+[assembly: UsesPermission(Android.Manifest.Permission.ForegroundService)]
+[assembly: UsesPermission(Android.Manifest.Permission.WakeLock)]
+[assembly: UsesPermission(Android.Manifest.Permission.ReceiveBootCompleted)]
+
+// ── Dangerous permissions (requested at runtime in MainActivity) ──────────────
+[assembly: UsesPermission(Android.Manifest.Permission.AccessFineLocation)]
+[assembly: UsesPermission(Android.Manifest.Permission.AccessCoarseLocation)]
+[assembly: UsesPermission(Android.Manifest.Permission.AccessBackgroundLocation)]
+[assembly: UsesPermission(Android.Manifest.Permission.UseFingerprint)]
+[assembly: UsesPermission("android.permission.USE_BIOMETRIC")]

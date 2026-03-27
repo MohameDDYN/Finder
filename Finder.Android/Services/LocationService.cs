@@ -4,12 +4,13 @@ using Android.App;
 using Android.Content;
 using Android.OS;
 using Android.Preferences;
+using Finder.Droid.Services;
 using Finder.Services;
 using Xamarin.Essentials;
 using Xamarin.Forms;
 using Application = Android.App.Application;
 
-[assembly: Dependency(typeof(Finder.Droid.Services.LocationService))]
+[assembly: Dependency(typeof(LocationService))]
 namespace Finder.Droid.Services
 {
     public class LocationService : ILocationService
@@ -33,9 +34,11 @@ namespace Finder.Droid.Services
                 else
                     _context.StartService(_serviceIntent);
 
-                // Write true using the same PreferenceManager as the service and BootReceiver.
-                // All three files must use identical storage so they share the same value.
+                // Write true — shared with BackgroundLocationService and BootReceiver.
                 SetTrackingPreference(true);
+
+                // Ensure the watchdog is scheduled whenever tracking starts.
+                WatchdogJobService.Schedule(_context);
 
                 return Task.CompletedTask;
             }
@@ -50,16 +53,17 @@ namespace Finder.Droid.Services
         {
             try
             {
-                // Must be set BEFORE StopService() so OnDestroy() sees it as true
+                // Set BEFORE StopService() so OnDestroy() sees it as true
                 // and skips the auto-restart logic.
                 BackgroundLocationService.IsStoppingByUserRequest = true;
 
-                // Write false here — authoritative write for the user-stop path.
-                // OnDestroy() checks the flag and also writes false, but this
-                // write ensures the preference is correct immediately.
+                // Authoritative write — ensures the preference is correct immediately.
                 SetTrackingPreference(false);
 
                 _context.StopService(_serviceIntent);
+
+                // Cancel the watchdog — no need to watch a stopped service.
+                WatchdogJobService.Cancel(_context);
 
                 return Task.CompletedTask;
             }
@@ -69,8 +73,7 @@ namespace Finder.Droid.Services
             }
             finally
             {
-                // Reset the flag after a delay so OnDestroy() has time to
-                // read it before it is cleared.
+                // Reset the flag after a delay so OnDestroy() has time to read it.
                 Task.Delay(2000).ContinueWith(_ =>
                 {
                     BackgroundLocationService.IsStoppingByUserRequest = false;
@@ -103,11 +106,8 @@ namespace Finder.Droid.Services
 
         /// <summary>
         /// Returns true if the tracking service is currently active.
-        /// MUST use PreferenceManager.GetDefaultSharedPreferences — the exact
-        /// same API used by BackgroundLocationService and BootReceiver.
-        /// Using any other storage (Xamarin.Essentials.Preferences, SecureStorage)
-        /// reads from a different file and always returns false, which permanently
-        /// disables the Stop button on app reopen.
+        /// Uses PreferenceManager.GetDefaultSharedPreferences — the same storage
+        /// used by BackgroundLocationService and BootReceiver.
         /// </summary>
         public Task<bool> IsTrackingActive()
         {
@@ -116,10 +116,6 @@ namespace Finder.Droid.Services
             return Task.FromResult(running);
         }
 
-        // ── Shared helper ────────────────────────────────────────────────────
-        // Same implementation used by BackgroundLocationService.SetRunningPreference().
-        // All three components (BootReceiver, LocationService, BackgroundLocationService)
-        // form a chain — each link must use the same key and the same storage API.
         private void SetTrackingPreference(bool running)
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
