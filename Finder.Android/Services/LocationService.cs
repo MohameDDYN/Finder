@@ -4,6 +4,7 @@ using Android.App;
 using Android.Content;
 using Android.OS;
 using Android.Preferences;
+using Finder.Droid.Managers;
 using Finder.Droid.Services;
 using Finder.Services;
 using Xamarin.Essentials;
@@ -29,10 +30,12 @@ namespace Finder.Droid.Services
         {
             try
             {
+                // Stop the app-side handler before the service starts.
+                // The service will create its own TelegramCommandHandler instance.
+                AppCommandHandler.Stop();
+
                 // Tag the intent so BackgroundLocationService knows this is an
                 // explicit user action and should send the Telegram startup message.
-                // Auto-restarts (BootReceiver, OnDestroy, Watchdog, RestartReceiver)
-                // never set this extra.
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
                 intent.PutExtra("explicit_user_start", true);
 
@@ -63,6 +66,11 @@ namespace Finder.Droid.Services
                 SetTrackingPreference(false);
                 _context.StopService(_serviceIntent);
                 WatchdogJobService.Cancel(_context);
+
+                // Hand Telegram polling back to the app now that the service is stopped.
+                // MainActivity.OnResume also does this as a safety net, but calling it
+                // here ensures the bot responds immediately while the app is visible.
+                AppCommandHandler.Start(_context, sendStartupMessage: false);
 
                 return Task.CompletedTask;
             }

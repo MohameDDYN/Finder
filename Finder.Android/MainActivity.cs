@@ -4,6 +4,8 @@ using Android.Content;
 using Android.Content.PM;
 using Android.OS;
 using Android.Runtime;
+using Finder.Droid.Managers;
+using Finder.Droid.Services;
 
 namespace Finder.Droid
 {
@@ -20,10 +22,10 @@ namespace Finder.Droid
             ConfigChanges.SmallestScreenSize)]
     public class MainActivity : global::Xamarin.Forms.Platform.Android.FormsAppCompatActivity
     {
-        // Dangerous permission request codes — normal permissions are granted at install time.
-        private const int RC_LOCATION = 100;  // ACCESS_FINE_LOCATION + ACCESS_COARSE_LOCATION
-        private const int RC_BACKGROUND = 101;  // ACCESS_BACKGROUND_LOCATION (API 29+ only)
-        private const int RC_BIOMETRIC = 102;  // USE_BIOMETRIC (API 28+) / USE_FINGERPRINT
+        // Dangerous permission request codes
+        private const int RC_LOCATION = 100;
+        private const int RC_BACKGROUND = 101;
+        private const int RC_BIOMETRIC = 102;
 
         protected override void OnCreate(Bundle savedInstanceState)
         {
@@ -36,12 +38,30 @@ namespace Finder.Droid
             LoadApplication(new App());
 
             // Request permissions on first launch.
-            // Each step chains into the next via OnRequestPermissionsResult,
-            // respecting Android's one-dangerous-group-at-a-time rule.
+            // Each step chains into the next via OnRequestPermissionsResult.
             RequestLocationPermissions();
         }
 
-        // Step 1: Fine + Coarse location
+        protected override void OnResume()
+        {
+            base.OnResume();
+
+            // If the tracking service is not running, the app takes over Telegram
+            // command polling so the bot stays responsive while the app is visible.
+            if (!BackgroundLocationService.IsRunning)
+                AppCommandHandler.Start(this, sendStartupMessage: false);
+        }
+
+        protected override void OnPause()
+        {
+            base.OnPause();
+
+            // App is going to background — stop the app-side handler.
+            // If the service is running it owns the handler and is unaffected.
+            AppCommandHandler.Stop();
+        }
+
+        // ── Step 1: Fine + Coarse location ───────────────────────────────────
         private void RequestLocationPermissions()
         {
             bool fineGranted = CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation)
@@ -170,6 +190,7 @@ namespace Finder.Droid
 
         protected override void OnDestroy()
         {
+            AppCommandHandler.Stop();
             base.OnDestroy();
         }
     }
