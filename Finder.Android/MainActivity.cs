@@ -28,10 +28,6 @@ namespace Finder.Droid
         private const int RC_BACKGROUND = 101;
         private const int RC_BIOMETRIC = 102;
 
-        // App-level Telegram command handler.
-        // Active only while the app is in the foreground AND the service is not running.
-        private TelegramCommandHandler _appCommandHandler;
-
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
@@ -46,58 +42,23 @@ namespace Finder.Droid
             RequestLocationPermissions();
         }
 
-        // ── App-level Telegram handler ────────────────────────────────────
-
-        /// <summary>
-        /// Starts the app-level Telegram command handler if the background
-        /// service is not running. Ensures only one handler is active at a time.
-        /// </summary>
         private void StartAppHandlerIfNeeded()
         {
-            if (_appCommandHandler != null) return;
-
-            bool serviceRunning = IsServiceRunning();
-            if (serviceRunning) return;
-
-            try
-            {
-                _appCommandHandler = new TelegramCommandHandler(this);
-                _appCommandHandler.Start(sendStartupMessage: false);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MainActivity] App handler start error: {ex.Message}");
-            }
+            if (IsServiceRunning()) return;
+            AppCommandHandler.Start(this, sendStartupMessage: false);
         }
 
-        /// <summary>
-        /// Stops the app-level Telegram command handler.
-        /// Called when the service starts (it takes over) or when the app goes to background.
-        /// </summary>
         private void StopAppHandler()
         {
-            _appCommandHandler?.Stop();
-            _appCommandHandler = null;
+            AppCommandHandler.Stop();
         }
 
-        /// <summary>
-        /// Reads the SharedPreferences key written by LocationService and BackgroundLocationService.
-        /// Uses the same storage as all other components to stay in sync.
-        /// </summary>
         private bool IsServiceRunning()
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
             return prefs.GetBoolean("is_tracking_service_running", false);
         }
 
-        // ── MessagingCenter subscriptions ─────────────────────────────────
-
-        /// <summary>
-        /// Subscribes to service state change messages published by MainViewModel.
-        /// ServiceStarted → stop app handler (service takes over polling).
-        /// ServiceStopped → start app handler (service is gone).
-        /// </summary>
         private void SubscribeToServiceStateMessages()
         {
             MessagingCenter.Subscribe<MainViewModel>(this, "ServiceStarted", sender =>
@@ -117,14 +78,10 @@ namespace Finder.Droid
             MessagingCenter.Unsubscribe<MainViewModel>(this, "ServiceStopped");
         }
 
-        // ── Activity lifecycle ────────────────────────────────────────────
-
         protected override void OnResume()
         {
             base.OnResume();
 
-            // Re-evaluate handler state every time the app comes to foreground.
-            // The service may have started or stopped while the app was in background.
             if (IsServiceRunning())
                 StopAppHandler();
             else
@@ -134,10 +91,6 @@ namespace Finder.Droid
         protected override void OnPause()
         {
             base.OnPause();
-
-            // Stop app-level polling when the app goes to background.
-            // If the service is running it continues unaffected.
-            // If the service is not running, nobody polls until the app returns.
             StopAppHandler();
         }
 
@@ -147,8 +100,6 @@ namespace Finder.Droid
             UnsubscribeFromServiceStateMessages();
             base.OnDestroy();
         }
-
-        // ── Permission chain ──────────────────────────────────────────────
 
         private void RequestLocationPermissions()
         {
@@ -263,11 +214,7 @@ namespace Finder.Droid
                 intent.SetData(Android.Net.Uri.Parse($"package:{PackageName}"));
                 StartActivity(intent);
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MainActivity] OpenAppSettings error: {ex.Message}");
-            }
+            catch { }
         }
     }
 }
