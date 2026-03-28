@@ -99,13 +99,7 @@ namespace Finder.Droid.Services
             {
                 try
                 {
-                    // Ensure the app-side handler is stopped before the service creates its own.
-                    // This is a safety guard — LocationService.StartTracking() also calls Stop(),
-                    // but auto-restarts (BootReceiver, Watchdog) bypass LocationService entirely.
                     AppCommandHandler.Stop();
-
-                    bool isExplicitUserStart =
-                        intent?.GetBooleanExtra("explicit_user_start", false) ?? false;
 
                     _commandHandler = new TelegramCommandHandler(this);
                     _commandHandler.Start(sendStartupMessage: isExplicitUserStart);
