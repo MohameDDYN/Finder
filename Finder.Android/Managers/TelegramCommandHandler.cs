@@ -29,13 +29,14 @@ namespace Finder.Droid.Managers
 
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
+        private const string LAST_UPDATE_ID_KEY = "telegram_last_update_id";
 
         private readonly string _settingsFilePath;
         private readonly Context _context;
         private readonly GeoJsonManager _geoJsonManager;
         private HttpClient _httpClient;
         private Timer _pollTimer;
-        private long _lastUpdateId = 0;
+        private long _lastUpdateId;
 
         public TelegramCommandHandler(Context context)
         {
@@ -45,6 +46,9 @@ namespace Finder.Droid.Managers
                 "secure_settings.json");
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             _geoJsonManager = new GeoJsonManager(context);
+
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            _lastUpdateId = prefs.GetLong(LAST_UPDATE_ID_KEY, 0);
 
             CreateGpsAlertNotificationChannel();
         }
@@ -118,6 +122,10 @@ namespace Finder.Droid.Managers
                     if (!string.IsNullOrEmpty(text) && text.StartsWith("/"))
                         await ProcessCommandAsync(text, settings);
                 }
+
+                var prefsEditor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+                prefsEditor.PutLong(LAST_UPDATE_ID_KEY, _lastUpdateId);
+                prefsEditor.Apply();
             }
             catch { }
         }
@@ -487,6 +495,8 @@ namespace Finder.Droid.Managers
         {
             try
             {
+                AppCommandHandler.Stop();
+
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
                 if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
                     _context.StartForegroundService(intent);
@@ -506,6 +516,7 @@ namespace Finder.Droid.Managers
             try
             {
                 BackgroundLocationService.IsStoppingByUserRequest = true;
+
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
                 _context.StopService(intent);
 
@@ -517,6 +528,7 @@ namespace Finder.Droid.Managers
                 Task.Delay(2000).ContinueWith(_ =>
                 {
                     BackgroundLocationService.IsStoppingByUserRequest = false;
+                    AppCommandHandler.Start(_context, sendStartupMessage: false);
                 });
             }
             catch { }
