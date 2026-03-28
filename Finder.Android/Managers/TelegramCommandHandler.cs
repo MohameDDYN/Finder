@@ -41,7 +41,7 @@ namespace Finder.Droid.Managers
         {
             _context = context;
             _settingsFilePath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Personal),
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal),
                 "secure_settings.json");
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             _geoJsonManager = new GeoJsonManager(context);
@@ -440,7 +440,7 @@ namespace Finder.Droid.Managers
                 }
 
                 string tempPath = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.Personal),
+                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal),
                     $"report_{date:yyyy-MM-dd}.geojson");
 
                 File.WriteAllText(tempPath, geoJson);
