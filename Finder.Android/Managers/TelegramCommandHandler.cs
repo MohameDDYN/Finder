@@ -49,7 +49,22 @@ namespace Finder.Droid.Managers
 
         // ── Start / Stop ───────────────────────────────────────────────────
 
-        public void Start()
+        /// <summary>
+        /// Starts the Telegram command polling loop.
+        /// </summary>
+        /// <param name="sendStartupMessage">
+        /// Pass TRUE only when the user explicitly pressed "Start Tracking" in
+        /// the UI — this is the only time the "🤖 Finder service started"
+        /// Telegram message should be sent.
+        ///
+        /// Always FALSE for:
+        ///   • App launch (MainActivity)
+        ///   • Phone reboot (BootReceiver)
+        ///   • OS / crash auto-restart (OnDestroy)
+        ///   • Watchdog recovery (WatchdogJobService)
+        ///   • Task-swipe restart (RestartReceiver)
+        /// </param>
+        public void Start(bool sendStartupMessage = false)
         {
             try
             {
@@ -59,25 +74,30 @@ namespace Finder.Droid.Managers
 
                 _pollTimer = new Timer(PollForCommands, null, 0, 10000);
 
-                // Send startup notification (with cooldown to prevent spam on restart)
-                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
+                // Only send the startup Telegram message on an explicit user action.
+                if (sendStartupMessage)
+                {
+                    var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                    bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
 
-                if (suppress)
-                {
-                    var editor = prefs.Edit();
-                    editor.PutBoolean("suppress_next_startup_message", false);
-                    editor.Apply();
-                }
-                else if ((DateTime.Now - _lastStartupMessage).TotalSeconds > STARTUP_COOLDOWN_S)
-                {
-                    _lastStartupMessage = DateTime.Now;
-                    _ = Task.Run(async () =>
+                    if (suppress)
                     {
-                        await Task.Delay(2000);
-                        await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                            "🤖 Finder service started");
-                    });
+                        // Clear the flag — it was set by /restart to avoid a
+                        // duplicate "started" message during the restart sequence.
+                        var editor = prefs.Edit();
+                        editor.PutBoolean("suppress_next_startup_message", false);
+                        editor.Apply();
+                    }
+                    else if ((DateTime.Now - _lastStartupMessage).TotalSeconds > STARTUP_COOLDOWN_S)
+                    {
+                        _lastStartupMessage = DateTime.Now;
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(2000);
+                            await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                                "🤖 Finder service started");
+                        });
+                    }
                 }
             }
             catch { /* Silent fail */ }
@@ -202,7 +222,8 @@ namespace Finder.Droid.Managers
                         await SendTelegramMessageAsync(currentSettings.BotToken,
                             currentSettings.ChatId, "🔄 Restarting service…");
 
-                        // Suppress startup message on the next launch
+                        // Suppress startup message on the next service start
+                        // because the /restart command already sent a message above.
                         var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", true);
@@ -340,22 +361,25 @@ namespace Finder.Droid.Managers
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId, summary);
 
                 string tempFile = Path.Combine(
-                    Path.GetTempPath(), $"finder_report_{date:yyyy-MM-dd}.geojson");
-                await File.WriteAllTextAsync(tempFile, geoJson);
-                await SendFileToTelegramAsync(tempFile, $"GeoJSON · {date:yyyy-MM-dd}", settings);
+                    Path.GetTempPath(),
+                    $"finder_report_{date:yyyy-MM-dd}.geojson");
+                File.WriteAllText(tempFile, geoJson);
+                await SendFileToTelegramAsync(tempFile,
+                    $"GeoJSON · {date:yyyy-MM-dd}", settings);
 
                 if (File.Exists(tempFile)) File.Delete(tempFile);
             }
             catch { /* Silent fail */ }
         }
 
-        private async Task SendFileToTelegramAsync(string path, string caption, AppSettings settings)
+        private async Task SendFileToTelegramAsync(
+            string path, string caption, AppSettings settings)
         {
             try
             {
                 using (var form = new MultipartFormDataContent())
                 {
-                    var bytes = await File.ReadAllBytesAsync(path);
+                    var bytes = File.ReadAllBytes(path);
                     var content = new ByteArrayContent(bytes);
                     content.Headers.ContentType =
                         new System.Net.Http.Headers.MediaTypeHeaderValue("application/geo+json");

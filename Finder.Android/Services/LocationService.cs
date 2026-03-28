@@ -24,17 +24,31 @@ namespace Finder.Droid.Services
             _serviceIntent = new Intent(_context, typeof(BackgroundLocationService));
         }
 
-        /// <summary>Starts the foreground location tracking service.</summary>
+        /// <summary>
+        /// Starts the foreground location tracking service.
+        /// Tags the intent with explicit_user_start = true so
+        /// BackgroundLocationService knows to send the Telegram
+        /// "service started" message — auto-restarts never set this flag.
+        /// </summary>
         public Task StartTracking()
         {
             try
             {
-                if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
-                    _context.StartForegroundService(_serviceIntent);
-                else
-                    _context.StartService(_serviceIntent);
+                // Build a new intent with the explicit user start flag.
+                // This is the ONLY code path that sets explicit_user_start = true.
+                // BootReceiver, OnDestroy auto-restart, WatchdogJobService and
+                // RestartReceiver all start the service WITHOUT this extra, so
+                // the startup message is never sent on those paths.
+                var intent = new Intent(_context, typeof(BackgroundLocationService));
+                intent.PutExtra("explicit_user_start", true);
 
-                // Write true — shared with BackgroundLocationService and BootReceiver.
+                if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
+                    _context.StartForegroundService(intent);
+                else
+                    _context.StartService(intent);
+
+                // Write true using the same PreferenceManager as the service
+                // and BootReceiver. All three files must use identical storage.
                 SetTrackingPreference(true);
 
                 // Ensure the watchdog is scheduled whenever tracking starts.
@@ -53,11 +67,13 @@ namespace Finder.Droid.Services
         {
             try
             {
-                // Set BEFORE StopService() so OnDestroy() sees it as true
+                // Must be set BEFORE StopService() so OnDestroy() sees it as true
                 // and skips the auto-restart logic.
                 BackgroundLocationService.IsStoppingByUserRequest = true;
 
                 // Authoritative write — ensures the preference is correct immediately.
+                // OnDestroy() checks the flag and also writes false, but this
+                // write ensures the preference is correct immediately.
                 SetTrackingPreference(false);
 
                 _context.StopService(_serviceIntent);
@@ -106,8 +122,10 @@ namespace Finder.Droid.Services
 
         /// <summary>
         /// Returns true if the tracking service is currently active.
-        /// Uses PreferenceManager.GetDefaultSharedPreferences — the same storage
-        /// used by BackgroundLocationService and BootReceiver.
+        /// MUST use PreferenceManager.GetDefaultSharedPreferences — the exact
+        /// same API used by BackgroundLocationService and BootReceiver.
+        /// Using any other storage (Xamarin.Essentials.Preferences, SecureStorage)
+        /// reads from a different file and always returns false.
         /// </summary>
         public Task<bool> IsTrackingActive()
         {
@@ -116,6 +134,8 @@ namespace Finder.Droid.Services
             return Task.FromResult(running);
         }
 
+        // ── Shared helper ─────────────────────────────────────────────────────
+        // Same key and same API used by BackgroundLocationService and BootReceiver.
         private void SetTrackingPreference(bool running)
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);

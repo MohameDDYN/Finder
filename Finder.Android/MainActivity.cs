@@ -4,7 +4,6 @@ using Android.Content;
 using Android.Content.PM;
 using Android.OS;
 using Android.Runtime;
-using Finder.Droid.Managers;
 
 namespace Finder.Droid
 {
@@ -24,24 +23,25 @@ namespace Finder.Droid
         // ── Runtime permission request codes ──────────────────────────────────
         //
         //  Only DANGEROUS permissions need runtime requests.
-        //  The permissions below are the only dangerous ones in the manifest:
         //
         //  RC_LOCATION   → ACCESS_FINE_LOCATION + ACCESS_COARSE_LOCATION
-        //  RC_BACKGROUND → ACCESS_BACKGROUND_LOCATION  (API 29+ only,
+        //  RC_BACKGROUND → ACCESS_BACKGROUND_LOCATION (API 29+ only,
         //                  must follow RC_LOCATION being granted)
         //  RC_BIOMETRIC  → USE_BIOMETRIC (API 28+) / USE_FINGERPRINT (API < 28)
         //
         //  Normal permissions (INTERNET, ACCESS_NETWORK_STATE, FOREGROUND_SERVICE,
         //  INSTANT_APP_FOREGROUND_SERVICE, WAKE_LOCK, RECEIVE_BOOT_COMPLETED)
-        //  are granted automatically at install time — no runtime request needed.
+        //  are granted automatically at install — no runtime request needed.
+        //
+        //  NOTE: TelegramCommandHandler has been removed from MainActivity entirely.
+        //  The BackgroundLocationService manages its own handler instance.
+        //  Having a second handler here was causing a duplicate "Finder service
+        //  started" Telegram message on every app launch and created two
+        //  competing polling loops reading the same bot updates.
         // ──────────────────────────────────────────────────────────────────────
         private const int RC_LOCATION = 100;
         private const int RC_BACKGROUND = 101;
         private const int RC_BIOMETRIC = 102;
-
-        private TelegramCommandHandler _commandHandler;
-
-        // ─────────────────────────────────────────────────────────────────────
 
         protected override void OnCreate(Bundle savedInstanceState)
         {
@@ -64,18 +64,6 @@ namespace Finder.Droid
             // Each step is triggered inside OnRequestPermissionsResult so
             // Android's "one dangerous group at a time" rule is respected.
             RequestLocationPermissions();
-
-            // Start the Telegram command handler
-            try
-            {
-                _commandHandler = new TelegramCommandHandler(this);
-                _commandHandler.Start();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MainActivity] CommandHandler start error: {ex.Message}");
-            }
         }
 
         // ── Step 1: Fine + Coarse location ───────────────────────────────────
@@ -121,7 +109,7 @@ namespace Finder.Droid
             if (!backgroundGranted)
             {
                 // On Android 11+ (API 30+) the system redirects the user to
-                // the Settings screen to enable "Allow all the time".
+                // Settings to enable "Allow all the time".
                 RequestPermissions(
                     new[] { Android.Manifest.Permission.AccessBackgroundLocation },
                     RC_BACKGROUND);
@@ -140,24 +128,16 @@ namespace Finder.Droid
             if (Build.VERSION.SdkInt >= BuildVersionCodes.P) // API 28+
             {
                 const string useBiometric = "android.permission.USE_BIOMETRIC";
-
                 if (CheckSelfPermission(useBiometric) != Permission.Granted)
-                {
                     RequestPermissions(new[] { useBiometric }, RC_BIOMETRIC);
-                }
-                // else: already granted — permission chain complete
             }
             else
             {
-                // API < 28: USE_FINGERPRINT
                 if (CheckSelfPermission(Android.Manifest.Permission.UseFingerprint)
                     != Permission.Granted)
-                {
                     RequestPermissions(
                         new[] { Android.Manifest.Permission.UseFingerprint },
                         RC_BIOMETRIC);
-                }
-                // else: already granted — permission chain complete
             }
         }
 
@@ -174,34 +154,26 @@ namespace Finder.Droid
 
             switch (requestCode)
             {
-                // ── Location result ───────────────────────────────────────────
                 case RC_LOCATION:
                     bool fineGranted = grantResults.Length > 0
                                        && grantResults[0] == Permission.Granted;
                     if (fineGranted)
-                    {
-                        // Location granted → proceed to background location
                         RequestBackgroundLocationPermission();
-                    }
                     else
-                    {
-                        // Denied — show rationale dialog then re-request
                         ShowLocationRationaleDialog();
-                    }
                     break;
 
-                // ── Background location result ────────────────────────────────
                 case RC_BACKGROUND:
-                    // Regardless of result, continue — the app still works
-                    // without "Allow all the time" (foreground-only tracking).
+                    // Whether granted or denied, continue.
+                    // App still works without "Allow all the time"
+                    // (foreground-only tracking).
                     RequestBiometricPermission();
                     break;
 
-                // ── Biometric result ──────────────────────────────────────────
                 case RC_BIOMETRIC:
                     // All permission steps complete.
-                    // Biometric is optional — the app still works without it;
-                    // the fingerprint unlock button will simply be hidden.
+                    // Biometric is optional — the fingerprint button will
+                    // simply be hidden if not granted.
                     break;
             }
         }
@@ -217,7 +189,6 @@ namespace Finder.Droid
                     "Without this permission the tracking service cannot start.")
                 .SetPositiveButton("Grant", (s, e) =>
                 {
-                    // Re-request after user reads the rationale
                     RequestPermissions(new[]
                     {
                         Android.Manifest.Permission.AccessFineLocation,
@@ -230,7 +201,6 @@ namespace Finder.Droid
         }
 
         // ── Opens the app's system Settings page ──────────────────────────────
-        // Used when the user has permanently denied a permission.
         private void OpenAppSettings()
         {
             try
@@ -247,12 +217,9 @@ namespace Finder.Droid
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-
         protected override void OnDestroy()
         {
             base.OnDestroy();
-            _commandHandler?.Stop();
         }
     }
 }
