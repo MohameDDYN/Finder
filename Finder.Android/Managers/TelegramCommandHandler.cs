@@ -15,14 +15,13 @@ namespace Finder.Droid.Managers
 {
     /// <summary>
     /// Polls Telegram for bot commands and executes them.
-    /// Runs a 10-second polling timer.
     /// Supported commands: /interval, /status, /start, /stop,
     ///   /restart, /token, /chatid, /report, /today,
     ///   /yesterday, /files, /cleanup, /cmd
     /// </summary>
     public class TelegramCommandHandler
     {
-        // ── Anti-spam cooldowns ────────────────────────────────────────────
+        // Cooldown durations to prevent command spam
         private static DateTime _lastIntervalUpdate = DateTime.MinValue;
         private static DateTime _lastStartupMessage = DateTime.MinValue;
         private static DateTime _lastRestartCommand = DateTime.MinValue;
@@ -53,16 +52,9 @@ namespace Finder.Droid.Managers
         /// Starts the Telegram command polling loop.
         /// </summary>
         /// <param name="sendStartupMessage">
-        /// Pass TRUE only when the user explicitly pressed "Start Tracking" in
-        /// the UI — this is the only time the "🤖 Finder service started"
-        /// Telegram message should be sent.
-        ///
-        /// Always FALSE for:
-        ///   • App launch (MainActivity)
-        ///   • Phone reboot (BootReceiver)
-        ///   • OS / crash auto-restart (OnDestroy)
-        ///   • Watchdog recovery (WatchdogJobService)
-        ///   • Task-swipe restart (RestartReceiver)
+        /// True only when the user explicitly pressed "Start Tracking" in the UI.
+        /// Sends the "🤖 Finder service started" Telegram message.
+        /// False for all auto-restarts (boot, crash, watchdog, task-swipe).
         /// </param>
         public void Start(bool sendStartupMessage = false)
         {
@@ -74,7 +66,6 @@ namespace Finder.Droid.Managers
 
                 _pollTimer = new Timer(PollForCommands, null, 0, 10000);
 
-                // Only send the startup Telegram message on an explicit user action.
                 if (sendStartupMessage)
                 {
                     var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
@@ -82,8 +73,7 @@ namespace Finder.Droid.Managers
 
                     if (suppress)
                     {
-                        // Clear the flag — it was set by /restart to avoid a
-                        // duplicate "started" message during the restart sequence.
+                        // Clear the flag set by /restart to avoid a duplicate message.
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", false);
                         editor.Apply();
@@ -156,7 +146,6 @@ namespace Finder.Droid.Managers
 
                 switch (cmd)
                 {
-                    // ── /interval ─────────────────────────────────────────
                     case "/interval":
                         if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
                         {
@@ -171,7 +160,6 @@ namespace Finder.Droid.Managers
                             SaveSettings(currentSettings);
                             await SecureStorage.SetAsync("Interval", ivMs.ToString());
 
-                            // Notify running service via broadcast
                             var bIntent = new Intent("com.finder.UPDATE_INTERVAL");
                             bIntent.PutExtra("new_interval", ivMs);
                             _context.SendBroadcast(bIntent);
@@ -184,7 +172,6 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /status ───────────────────────────────────────────
                     case "/status":
                         var files = _geoJsonManager.GetAvailableDataFiles();
                         response = $"📍 Status\n" +
@@ -196,19 +183,16 @@ namespace Finder.Droid.Managers
                                    $"Device time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
                         break;
 
-                    // ── /start ────────────────────────────────────────────
                     case "/start":
                         StartService();
                         response = "✅ Location tracking started";
                         break;
 
-                    // ── /stop ─────────────────────────────────────────────
                     case "/stop":
                         StopService();
                         response = "⏹ Location tracking stopped";
                         break;
 
-                    // ── /restart ──────────────────────────────────────────
                     case "/restart":
                         if ((DateTime.Now - _lastRestartCommand).TotalSeconds < RESTART_COOLDOWN_S)
                         {
@@ -222,8 +206,8 @@ namespace Finder.Droid.Managers
                         await SendTelegramMessageAsync(currentSettings.BotToken,
                             currentSettings.ChatId, "🔄 Restarting service…");
 
-                        // Suppress startup message on the next service start
-                        // because the /restart command already sent a message above.
+                        // Suppress the startup message on the next service start
+                        // because the restart notification above already informed the user.
                         var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", true);
@@ -237,7 +221,6 @@ namespace Finder.Droid.Managers
                         response = "✅ Service restarted successfully";
                         break;
 
-                    // ── /token ────────────────────────────────────────────
                     case "/token":
                         if (!string.IsNullOrEmpty(param))
                         {
@@ -249,7 +232,6 @@ namespace Finder.Droid.Managers
                         else response = "❌ Usage: /token [your_bot_token]";
                         break;
 
-                    // ── /chatid ───────────────────────────────────────────
                     case "/chatid":
                         if (!string.IsNullOrEmpty(param))
                         {
@@ -261,7 +243,6 @@ namespace Finder.Droid.Managers
                         else response = "❌ Usage: /chatid [your_chat_id]";
                         break;
 
-                    // ── /report ───────────────────────────────────────────
                     case "/report":
                         if (!string.IsNullOrEmpty(param) &&
                             DateTime.TryParse(param, out DateTime rDate))
@@ -280,7 +261,6 @@ namespace Finder.Droid.Managers
                         await SendGeoJsonReportAsync(DateTime.Today.AddDays(-1), currentSettings);
                         return;
 
-                    // ── /files ────────────────────────────────────────────
                     case "/files":
                         var avail = _geoJsonManager.GetAvailableDataFiles();
                         if (avail.Count == 0)
@@ -303,7 +283,6 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /cleanup ──────────────────────────────────────────
                     case "/cleanup":
                         int keepDays = int.TryParse(param, out int d) && d > 0 ? d : 30;
                         int before = _geoJsonManager.GetAvailableDataFiles().Count;
@@ -312,7 +291,6 @@ namespace Finder.Droid.Managers
                         response = $"🧹 Cleanup done · Removed {before - after} files older than {keepDays} days";
                         break;
 
-                    // ── /cmd ──────────────────────────────────────────────
                     case "/cmd":
                     default:
                         response = "📋 Available commands:\n" +

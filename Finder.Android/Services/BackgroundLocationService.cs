@@ -20,23 +20,19 @@ namespace Finder.Droid.Services
     [Service(ForegroundServiceType = Android.Content.PM.ForegroundService.TypeLocation)]
     public class BackgroundLocationService : Service, ILocationListener
     {
-        // ── Static flags ──────────────────────────────────────────────────────
-
         /// <summary>
-        /// True only when the user explicitly presses Stop in the UI or sends /stop via Telegram.
-        /// Used by OnDestroy() to decide whether to auto-restart and whether to write
-        /// false to SharedPreferences.
+        /// Set to true before calling StopService() when the user intentionally stops tracking.
+        /// OnDestroy() reads this flag to decide whether to auto-restart the service
+        /// and whether to write false to SharedPreferences.
         /// </summary>
         public static bool IsStoppingByUserRequest = false;
 
         /// <summary>
         /// True while this service instance is alive in the current process.
-        /// Reset to false in OnDestroy(). Used by WatchdogJobService to detect
-        /// whether the service is actually running (not just what the preference says).
+        /// WatchdogJobService checks this to detect an unexpected service death.
         /// </summary>
         public static bool IsRunning = false;
 
-        // ── Constants ─────────────────────────────────────────────────────────
         public const int SERVICE_NOTIFICATION_ID = 1001;
         private const string NOTIFICATION_CHANNEL_ID = "finder_location_channel";
         private const string PREF_KEY_RUNNING = "is_tracking_service_running";
@@ -45,7 +41,6 @@ namespace Finder.Droid.Services
         private const int MOVING_UPDATE_INTERVAL_MS = 20000;
         private const float SIGNIFICANT_MOVEMENT_METERS = 25f;
 
-        // ── State ─────────────────────────────────────────────────────────────
         private AndroidLocation _lastSignificantLocation;
         private int _currentUpdateInterval = STATIONARY_UPDATE_INTERVAL_MS;
         private LocationManager _locationManager;
@@ -57,17 +52,15 @@ namespace Finder.Droid.Services
         private bool _isProcessingLocation = false;
         private int _updateCounter = 0;
 
-        // ── Dependencies ──────────────────────────────────────────────────────
         private GeoJsonManager _geoJsonManager;
         private TelegramCommandHandler _commandHandler;
         private IntervalUpdateReceiver _intervalUpdateReceiver;
 
-        // ── Credentials ───────────────────────────────────────────────────────
         private string _telegramBotToken;
         private string _chatId;
         private string _interval;
 
-        // Single JSON file shared between UI layer and all Android components.
+        // Single JSON settings file shared between the UI layer and all Android components.
         private readonly string _settingsFilePath;
 
         public BackgroundLocationService()
@@ -84,11 +77,13 @@ namespace Finder.Droid.Services
         public override StartCommandResult OnStartCommand(
             Intent intent, StartCommandFlags flags, int startId)
         {
-            // Mark this process-level instance as alive
             IsRunning = true;
-
-            // Always write true — covers normal start AND BootReceiver restart after reboot.
             SetRunningPreference(true);
+
+            // Read the flag set exclusively by LocationService.StartTracking().
+            // Auto-restarts never set this extra, so it defaults to false.
+            bool isExplicitUserStart =
+                intent?.GetBooleanExtra("explicit_user_start", false) ?? false;
 
             LoadSettings();
             _geoJsonManager = new GeoJsonManager(this);
@@ -105,7 +100,7 @@ namespace Finder.Droid.Services
                 try
                 {
                     _commandHandler = new TelegramCommandHandler(this);
-                    _commandHandler.Start();
+                    _commandHandler.Start(sendStartupMessage: isExplicitUserStart);
                 }
                 catch { /* Silent fail */ }
             }
@@ -118,45 +113,28 @@ namespace Finder.Droid.Services
 
             InitializeTelegramTimer();
             SetupDailyGeoJsonTimer();
+            WatchdogJobService.Schedule(this);
 
             _locationManager = GetSystemService(LocationService) as LocationManager;
             StartLocationUpdates();
 
-            // ── Layer 4: schedule the periodic watchdog job ────────────────────
-            // The watchdog runs every 15 min and restarts the service if it finds
-            // IsRunning=false while the preference still says it should be running.
-            WatchdogJobService.Schedule(this);
-
-            // Sticky: if Android kills the service due to memory pressure,
-            // it will restart it automatically (with a null intent).
+            // Sticky causes Android to restart this service automatically if it
+            // is killed due to memory pressure (intent will be null on restart).
             return StartCommandResult.Sticky;
         }
 
         public override void OnDestroy()
         {
-            // ── Do NOT write false unconditionally ────────────────────────────
-            //
-            // Writing false here unconditionally breaks two things:
-            //
-            //   • Reboot: Phone shuts down → OnDestroy fires → false written →
-            //     BootReceiver reads false after reboot → service never restarts. ❌
-            //
-            //   • Stop button: App closed → OnDestroy fires → false written →
-            //     UI reads false on reopen → Stop button is permanently disabled
-            //     even though the service is still running in the background. ❌
-            //
-            // LocationService.StopTracking() writes false BEFORE calling StopService(),
-            // so no write is needed here for the intentional-stop path.
-            // ─────────────────────────────────────────────────────────────────
+            // Only write false when the user explicitly stopped tracking.
+            // Skipping the write on other paths keeps the preference correct
+            // so BootReceiver can restart the service after a reboot.
             if (IsStoppingByUserRequest)
                 SetRunningPreference(false);
 
-            // Mark process-level instance as gone
             IsRunning = false;
 
             base.OnDestroy();
 
-            // Unregister broadcast receiver
             if (_intervalUpdateReceiver != null)
             {
                 try { UnregisterReceiver(_intervalUpdateReceiver); }
@@ -164,7 +142,6 @@ namespace Finder.Droid.Services
                 _intervalUpdateReceiver = null;
             }
 
-            // Release wake lock
             if (_wakeLock?.IsHeld == true)
             {
                 _wakeLock.Release();
@@ -183,9 +160,8 @@ namespace Finder.Droid.Services
             _httpClient?.Dispose();
             _httpClient = null;
 
-            // ── Layer 2: immediate auto-restart (OS / crash kills) ─────────────
-            // Only when the stop was NOT triggered by the user intentionally.
-            // This covers: OS memory kill, crash, unexpected termination.
+            // Auto-restart when the service dies for any reason other than
+            // an intentional user stop (OS memory kill, crash, etc.).
             if (!IsStoppingByUserRequest)
             {
                 try
@@ -197,20 +173,19 @@ namespace Finder.Droid.Services
                     else
                         StartService(restartIntent);
                 }
-                catch { /* Silent fail — Layer 3 / 4 will catch this */ }
+                catch { /* Silent fail */ }
             }
         }
 
         /// <summary>
-        /// Layer 3: Fires when the user swipes the app away from the Recent Tasks screen.
-        /// Schedules a delayed restart via AlarmManager so the service survives
-        /// task removal even if OnDestroy's direct restart fails.
+        /// Fires when the user swipes the app away from Recent Tasks.
+        /// Schedules RestartReceiver via AlarmManager to relaunch the service
+        /// 3 seconds later, giving the OS time to finish its cleanup first.
         /// </summary>
         public override void OnTaskRemoved(Intent rootIntent)
         {
             base.OnTaskRemoved(rootIntent);
 
-            // Only schedule a restart if the user has NOT explicitly stopped tracking.
             var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
             bool should = prefs.GetBoolean(PREF_KEY_RUNNING, false);
 
@@ -218,9 +193,7 @@ namespace Finder.Droid.Services
 
             try
             {
-                // Schedule the RestartReceiver to fire 3 seconds from now.
-                var restartIntent = new Intent(ApplicationContext,
-                    typeof(RestartReceiver));
+                var restartIntent = new Intent(ApplicationContext, typeof(RestartReceiver));
                 restartIntent.SetPackage(PackageName);
 
                 var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
@@ -231,7 +204,7 @@ namespace Finder.Droid.Services
                     ApplicationContext, 0, restartIntent, pendingFlags);
 
                 var alarmManager = (AlarmManager)GetSystemService(AlarmService);
-                long triggerAt = SystemClock.ElapsedRealtime() + 3000; // 3 s
+                long triggerAt = SystemClock.ElapsedRealtime() + 3000;
 
                 if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
                     alarmManager.SetExactAndAllowWhileIdle(
@@ -362,6 +335,7 @@ namespace Finder.Droid.Services
                                 System.Globalization.CultureInfo.InvariantCulture,
                                 out double lon))
                         {
+                            // Send every tick in moving mode, every 3rd tick when stationary.
                             if (inMovingMode || _updateCounter % 3 == 0)
                                 await SendLocationToTelegramAsync();
 
@@ -451,7 +425,6 @@ namespace Finder.Droid.Services
             catch { /* Silent fail */ }
             finally
             {
-                // Reschedule for the next midnight
                 SetupDailyGeoJsonTimer();
             }
         }
@@ -512,8 +485,7 @@ namespace Finder.Droid.Services
                     form.Add(new StringContent(caption), "caption");
 
                     await _httpClient.PostAsync(
-                        $"https://api.telegram.org/bot{settings.BotToken}/sendDocument",
-                        form);
+                        $"https://api.telegram.org/bot{settings.BotToken}/sendDocument", form);
                 }
             }
             catch { /* Silent fail */ }
@@ -537,7 +509,7 @@ namespace Finder.Droid.Services
                     return;
                 }
             }
-            catch { /* Fall through to defaults */ }
+            catch { /* Silent fail */ }
 
             _telegramBotToken = null;
             _chatId = null;

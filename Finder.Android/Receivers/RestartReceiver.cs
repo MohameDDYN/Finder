@@ -7,18 +7,15 @@ using Finder.Droid.Services;
 namespace Finder.Droid.Receivers
 {
     /// <summary>
-    /// Layer 3 — Receives the AlarmManager broadcast scheduled by
-    /// BackgroundLocationService.OnTaskRemoved().
-    ///
-    /// Fires 3 seconds after the user swipes the app away from Recent Tasks,
-    /// giving the OS time to clean up before the service is restarted.
+    /// Receives the AlarmManager broadcast scheduled by OnTaskRemoved().
+    /// Fires 3 seconds after the user swipes the app away from Recent Tasks
+    /// and restarts the tracking service if it should still be running.
     /// </summary>
     [BroadcastReceiver(Enabled = true, Exported = false)]
     public class RestartReceiver : BroadcastReceiver
     {
         public override void OnReceive(Context context, Intent intent)
         {
-            // Only restart if the preference says tracking should be active.
             var prefs = PreferenceManager.GetDefaultSharedPreferences(context);
             bool shouldBeRunning = prefs.GetBoolean("is_tracking_service_running", false);
 
