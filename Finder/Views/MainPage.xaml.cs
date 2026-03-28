@@ -10,7 +10,6 @@ namespace Finder.Views
 
         public MainPage()
         {
-            // Add the InverseBoolConverter to resources before InitializeComponent
             Resources = new ResourceDictionary();
             Resources.Add("InverseBoolConverter", new Finder.Converters.InverseBoolConverter());
 
@@ -19,7 +18,6 @@ namespace Finder.Views
             _viewModel = new MainViewModel();
             BindingContext = _viewModel;
 
-            // Subscribe to ViewModel events
             _viewModel.RequestOpenSettings += OnRequestOpenSettings;
             _viewModel.RequestViewHistory += OnRequestViewHistory;
             _viewModel.ShowAlert += OnShowAlert;
@@ -32,13 +30,10 @@ namespace Finder.Views
             await _viewModel.InitializeAsync();
         }
 
-        // ── Toolbar Settings button (also accessible from ViewModel event) ─
         private async void OnSettingsToolbarClicked(object sender, EventArgs e)
         {
             await Navigation.PushAsync(new PasscodePage(isAppStartup: false));
         }
-
-        // ── ViewModel event handlers ───────────────────────────────────────
 
         private async void OnRequestOpenSettings(object sender, EventArgs e)
         {
@@ -63,7 +58,7 @@ namespace Finder.Views
         protected override void OnDisappearing()
         {
             base.OnDisappearing();
-            // Unsubscribe to avoid memory leaks
+
             _viewModel.RequestOpenSettings -= OnRequestOpenSettings;
             _viewModel.RequestViewHistory -= OnRequestViewHistory;
             _viewModel.ShowAlert -= OnShowAlert;

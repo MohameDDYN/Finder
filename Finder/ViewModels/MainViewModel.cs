@@ -7,14 +7,10 @@ using Xamarin.Forms;
 
 namespace Finder.ViewModels
 {
-    /// <summary>
-    /// ViewModel for MainPage — manages tracking state and location sharing.
-    /// </summary>
     public class MainViewModel : BaseViewModel
     {
         private readonly ILocationService _locationService;
 
-        // ── Events raised to the View for navigation ───────────────────────
         public event EventHandler RequestOpenSettings;
         public event EventHandler RequestViewHistory;
         public event EventHandler<string> ShowAlert;
@@ -25,38 +21,13 @@ namespace Finder.ViewModels
             Title = "Finder";
             _locationService = DependencyService.Get<ILocationService>();
 
-            // ── FIX: Command CanExecute rules ──────────────────────────────
-            //
-            // StartServiceCommand: disabled while service is running OR busy.
-            //
-            // StopServiceCommand:  disabled ONLY when service is NOT running.
-            //                      IsBusy is intentionally NOT checked here.
-            //
-            //   Root cause of the bug:
-            //   The XAML had both Command="{Binding StopServiceCommand}" AND
-            //   IsEnabled="{Binding IsServiceRunning}" on the Stop button.
-            //   In Xamarin.Forms 5, Command.CanExecuteChanged calls
-            //   Button.UpdateIsEnabled() which directly overwrites IsEnabled,
-            //   bypassing the XAML binding. Because CanExecute included !IsBusy,
-            //   any moment IsBusy=true (e.g. during CheckServiceStatus on
-            //   OnAppearing) caused CanExecute=false, setting IsEnabled=false.
-            //   The XAML binding would try to restore it to true, but the two
-            //   mechanisms raced — and the CanExecute path often won, leaving
-            //   the Stop button permanently disabled.
-            //
-            //   Fix: Remove IsEnabled binding from XAML (MainPage.xaml).
-            //   Let Command.CanExecute be the single source of truth for
-            //   button state. Remove !IsBusy from StopServiceCommand so that
-            //   a user can always stop tracking regardless of busy state.
-            // ──────────────────────────────────────────────────────────────
-
             StartServiceCommand = new Command(
                 async () => await ExecuteStartService(),
                 () => !IsServiceRunning && !IsBusy);
 
             StopServiceCommand = new Command(
                 async () => await ExecuteStopService(),
-                () => IsServiceRunning);          // <── IsBusy removed intentionally
+                () => IsServiceRunning);
 
             ShareLocationCommand = new Command(
                 async () => await ExecuteShareLocation(),
@@ -84,10 +55,9 @@ namespace Finder.ViewModels
                 {
                     StatusText = value ? "● Tracking Active" : "○ Tracking Stopped";
                     StatusColor = value
-                        ? Color.FromHex("#43A047")   // green
-                        : Color.FromHex("#E53935");   // red
+                        ? Color.FromHex("#43A047")
+                        : Color.FromHex("#E53935");
 
-                    // Refresh both commands whenever service state changes.
                     ((Command)StartServiceCommand).ChangeCanExecute();
                     ((Command)StopServiceCommand).ChangeCanExecute();
                 }
@@ -131,18 +101,10 @@ namespace Finder.ViewModels
             await CheckServiceStatus();
         }
 
-        /// <summary>
-        /// Reads the service running state from the Android SharedPreferences
-        /// (via ILocationService) and updates IsServiceRunning accordingly.
-        /// </summary>
         public async Task CheckServiceStatus()
         {
             try
             {
-                // FIX: Only set IsBusy for the spinner/ShareLocation command.
-                // Start/Stop button state is driven by IsServiceRunning alone,
-                // so we update that first — before toggling IsBusy — so the
-                // buttons reflect the correct state immediately.
                 bool running = await _locationService.IsTrackingActive();
 
                 IsBusy = true;
@@ -175,10 +137,12 @@ namespace Finder.ViewModels
 
                 await _locationService.StartTracking();
 
-                // Set IsServiceRunning = true AFTER StartTracking() returns
-                // so the preference is already written before CanExecute is evaluated.
                 IsServiceRunning = true;
                 LastUpdateText = $"Started at {DateTime.Now:HH:mm:ss}";
+
+                // Notify MainActivity to stop the app-level handler —
+                // the background service now owns Telegram polling.
+                MessagingCenter.Send<MainViewModel>(this, "ServiceStarted");
 
                 ShowSuccess?.Invoke(this, "Location tracking started successfully.");
             }
@@ -198,11 +162,14 @@ namespace Finder.ViewModels
         {
             try
             {
-                // No IsBusy guard here — we want stop to always respond quickly.
                 await _locationService.StopTracking();
 
                 IsServiceRunning = false;
                 LastUpdateText = $"Stopped at {DateTime.Now:HH:mm:ss}";
+
+                // Notify MainActivity to start the app-level handler —
+                // the service is gone so the app must handle Telegram polling.
+                MessagingCenter.Send<MainViewModel>(this, "ServiceStopped");
 
                 ShowSuccess?.Invoke(this, "Location tracking stopped.");
             }
@@ -228,7 +195,6 @@ namespace Finder.ViewModels
                     return;
                 }
 
-                // Culture-safe decimal separator for coordinates
                 string lat = location.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 string lon = location.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 string mapsUrl = $"https://www.google.com/maps?q={lat},{lon}";
