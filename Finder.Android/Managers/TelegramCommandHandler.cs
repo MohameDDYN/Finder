@@ -201,16 +201,24 @@ namespace Finder.Droid.Managers
                     case "/status":
                         var statusFiles = _geoJsonManager.GetAvailableDataFiles();
                         bool sendsPaused = IsTelegramSendingPaused();
+                        bool autoStart = Xamarin.Essentials.Preferences.Get(
+                                               Finder.ViewModels.MainViewModel.PREF_AUTO_START,
+                                               false);
+
                         response = $"📍 *Status*\n" +
                                    $"Tracking: {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
                                    $"Telegram sends: {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
+                                   $"Auto-start on open: {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
                                    $"Token: {MaskToken(currentSettings.BotToken)}\n" +
                                    $"Chat ID: {currentSettings.ChatId}\n" +
                                    $"Interval: {currentSettings.Interval} ms\n" +
                                    $"Data files: {statusFiles.Count}\n" +
                                    $"Device time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+
                         if (sendsPaused)
                             response += "\n\n💡 Send /resumelocation to turn sends back on.";
+                        if (!autoStart)
+                            response += "\n💡 Send /autostart on to enable auto-start.";
                         break;
 
                     // ── /start ───────────────────────────────────────────────
@@ -370,6 +378,52 @@ namespace Finder.Droid.Managers
                         response = null; // handler sends its own messages
                         break;
 
+                    // ── /autostart on|off ─────────────────────────────────────
+                    // Enables or disables the behaviour where opening the app
+                    // automatically starts the tracking service if it is not
+                    // already running. The service itself is never stopped by
+                    // this command — only the on-open auto-start behaviour changes.
+                    case "/autostart":
+                        if (param == "on" || param == "enable" ||
+                            param == "yes" || param == "1" || param == "true")
+                        {
+                            Xamarin.Essentials.Preferences.Set(
+                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
+
+                            response = "✅ *Auto-start enabled*\n\n" +
+                                       "The tracking service will start automatically\n" +
+                                       "every time the app is opened by the user.\n\n" +
+                                       "• Service keeps running as normal\n" +
+                                       "• Takes effect the next time the app is opened\n\n" +
+                                       "Send /autostart off to disable.";
+                        }
+                        else if (param == "off" || param == "disable" ||
+                                 param == "no" || param == "0" || param == "false")
+                        {
+                            Xamarin.Essentials.Preferences.Set(
+                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
+
+                            response = "⏹ *Auto-start disabled*\n\n" +
+                                       "The app will no longer start the tracking\n" +
+                                       "service automatically when opened.\n\n" +
+                                       "• The currently running service is unaffected\n" +
+                                       "• User must press Start manually in the app\n\n" +
+                                       "Send /autostart on to re-enable.";
+                        }
+                        else
+                        {
+                            // No param → report current state
+                            bool current = Xamarin.Essentials.Preferences.Get(
+                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
+
+                            response = $"⚙ *Auto-start on open*\n\n" +
+                                       $"Current state: {(current ? "✅ Enabled" : "❌ Disabled")}\n\n" +
+                                       $"Usage:\n" +
+                                       $"/autostart on  — Enable auto-start\n" +
+                                       $"/autostart off — Disable auto-start";
+                        }
+                        break;
+
                     // ── /pauselocation ────────────────────────────────────────
                     // Stops periodic Telegram location sends.
                     // The service, GPS recording and GeoJSON logging keep running.
@@ -429,7 +483,8 @@ namespace Finder.Droid.Managers
                                    "/enablelocation — Send notification to enable GPS\n" +
                                    "/location — Get current location now\n" +
                                    "/pauselocation — Pause automatic Telegram sends\n" +
-                                   "/resumelocation — Resume automatic Telegram sends";
+                                   "/resumelocation — Resume automatic Telegram sends\n" +
+                                   "/autostart on|off — Auto-start service when app opens";
                         break;
                 }
 

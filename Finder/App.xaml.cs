@@ -68,7 +68,7 @@ namespace Finder
                 else
                 {
                     // No passcode required — go straight to main screen
-                    MainPage = new NavigationPage(new MainPage())
+                    MainPage = new NavigationPage(new Views.MainPage())
                     {
                         BarBackgroundColor = (Color)Resources["PrimaryColor"],
                         BarTextColor = Color.White

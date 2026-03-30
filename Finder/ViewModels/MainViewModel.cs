@@ -9,8 +9,14 @@ namespace Finder.ViewModels
 {
     public class MainViewModel : BaseViewModel
     {
+        // ── SharedPreferences key (via Xamarin.Essentials.Preferences) ────────
+        // Written by TelegramCommandHandler (/autostart on|off).
+        // Read here on every app open to decide whether to auto-start the service.
+        public const string PREF_AUTO_START = "auto_start_on_open";
+
         private readonly ILocationService _locationService;
 
+        // ── Events ─────────────────────────────────────────────────────────────
         public event EventHandler RequestOpenSettings;
         public event EventHandler RequestViewHistory;
         public event EventHandler<string> ShowAlert;
@@ -43,7 +49,7 @@ namespace Finder.ViewModels
                 async () => await CheckServiceStatus());
         }
 
-        // ── Bindable properties ────────────────────────────────────────────
+        // ── Bindable properties ────────────────────────────────────────────────
 
         private bool _isServiceRunning;
         public bool IsServiceRunning
@@ -85,7 +91,7 @@ namespace Finder.ViewModels
             set => SetProperty(ref _lastUpdateText, value);
         }
 
-        // ── Commands ───────────────────────────────────────────────────────
+        // ── Commands ───────────────────────────────────────────────────────────
 
         public ICommand StartServiceCommand { get; }
         public ICommand StopServiceCommand { get; }
@@ -94,12 +100,52 @@ namespace Finder.ViewModels
         public ICommand ViewHistoryCommand { get; }
         public ICommand RefreshStatusCommand { get; }
 
-        // ── Initialization ─────────────────────────────────────────────────
+        // ── Initialization ─────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Called every time MainPage appears (OnAppearing).
+        ///
+        /// Flow:
+        ///   1. Check whether the service is currently running.
+        ///   2. If the service is NOT running and auto-start is enabled,
+        ///      start the service automatically — no user tap required.
+        ///      The user is informed via the LastUpdateText label so the
+        ///      behaviour is transparent, not silent.
+        /// </summary>
         public async Task InitializeAsync()
         {
             await CheckServiceStatus();
+            await TryAutoStartAsync();
         }
+
+        /// <summary>
+        /// Reads the auto-start flag (set remotely via /autostart on|off) and
+        /// starts the service if the conditions are met.
+        ///
+        /// Conditions for auto-start:
+        ///   • auto_start_on_open == true   (set via Telegram command)
+        ///   • Service is not already running
+        ///   • App is not currently busy with another operation
+        /// </summary>
+        private async Task TryAutoStartAsync()
+        {
+            // Read the flag written by TelegramCommandHandler via the same key
+            bool autoStart = Preferences.Get(PREF_AUTO_START, false);
+
+            if (!autoStart || IsServiceRunning || IsBusy)
+                return;
+
+            // Inform the user transparently — auto-start is never silent
+            LastUpdateText = "⚙ Auto-starting service…";
+
+            await ExecuteStartService();
+
+            // If start succeeded, reflect it in the label
+            if (IsServiceRunning)
+                LastUpdateText = $"Auto-started at {DateTime.Now:HH:mm:ss}";
+        }
+
+        // ── Status check ───────────────────────────────────────────────────────
 
         public async Task CheckServiceStatus()
         {
@@ -125,7 +171,7 @@ namespace Finder.ViewModels
             }
         }
 
-        // ── Command implementations ────────────────────────────────────────
+        // ── Command implementations ────────────────────────────────────────────
 
         private async Task ExecuteStartService()
         {
@@ -195,8 +241,10 @@ namespace Finder.ViewModels
                     return;
                 }
 
-                string lat = location.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                string lon = location.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string lat = location.Latitude.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
+                string lon = location.Longitude.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
                 string mapsUrl = $"https://www.google.com/maps?q={lat},{lon}";
 
                 await Share.RequestAsync(new ShareTextRequest
