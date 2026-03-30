@@ -20,14 +20,33 @@ namespace Finder.Droid.Services
     [Service(ForegroundServiceType = Android.Content.PM.ForegroundService.TypeLocation)]
     public class BackgroundLocationService : Service, ILocationListener
     {
+        /// <summary>
+        /// Set to true before calling StopService() when the user intentionally stops tracking.
+        /// OnDestroy() reads this flag to decide whether to auto-restart the service
+        /// and whether to write false to SharedPreferences.
+        /// </summary>
         public static bool IsStoppingByUserRequest = false;
+
+        /// <summary>
+        /// True while this service instance is alive in the current process.
+        /// WatchdogJobService checks this to detect an unexpected service death.
+        /// </summary>
         public static bool IsRunning = false;
 
         public const int SERVICE_NOTIFICATION_ID = 1001;
         private const string NOTIFICATION_CHANNEL_ID = "finder_location_channel";
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
+
+        // ── SharedPreferences keys ─────────────────────────────────────────────
         private const string PREF_KEY_RUNNING = "is_tracking_service_running";
+        private const string PREF_KEY_SENDING_PAUSED = "is_telegram_sending_paused";
+
+        // ── Broadcast actions ──────────────────────────────────────────────────
+        // Existing: interval updates
+        public const string ACTION_UPDATE_INTERVAL = "com.finder.UPDATE_INTERVAL";
+        // NEW: pause / resume periodic Telegram location sends
+        public const string ACTION_SET_SENDING_PAUSED = "com.finder.SET_TELEGRAM_PAUSED";
 
         private const int STATIONARY_UPDATE_INTERVAL_MS = 60000;
         private const int MOVING_UPDATE_INTERVAL_MS = 20000;
@@ -44,6 +63,14 @@ namespace Finder.Droid.Services
         private bool _isProcessingLocation = false;
         private int _updateCounter = 0;
 
+        /// <summary>
+        /// When true the periodic Telegram location sends are suppressed.
+        /// The GPS recording and service continue unaffected.
+        /// Toggled by /pauselocation and /resumelocation commands via broadcast.
+        /// Persisted in SharedPreferences so it survives service restarts and reboots.
+        /// </summary>
+        private bool _isTelegramSendingPaused = false;
+
         private GeoJsonManager _geoJsonManager;
         private TelegramCommandHandler _commandHandler;
         private IntervalUpdateReceiver _intervalUpdateReceiver;
@@ -52,6 +79,7 @@ namespace Finder.Droid.Services
         private string _chatId;
         private string _interval;
 
+        // Single JSON settings file shared between the UI layer and all Android components.
         private readonly string _settingsFilePath;
 
         public BackgroundLocationService()
@@ -75,13 +103,24 @@ namespace Finder.Droid.Services
                 intent?.GetBooleanExtra("explicit_user_start", false) ?? false;
 
             LoadSettings();
+
+            // Restore the paused state that may have been set before a restart
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
+            _isTelegramSendingPaused = prefs.GetBoolean(PREF_KEY_SENDING_PAUSED, false);
+
             _geoJsonManager = new GeoJsonManager(this);
 
+            // Register the broadcast receiver for both interval updates and
+            // the new pause/resume actions using a multi-action IntentFilter.
             if (_intervalUpdateReceiver == null)
             {
                 _intervalUpdateReceiver = new IntervalUpdateReceiver(this);
-                RegisterReceiver(_intervalUpdateReceiver,
-                    new IntentFilter("com.finder.UPDATE_INTERVAL"));
+
+                var filter = new IntentFilter();
+                filter.AddAction(ACTION_UPDATE_INTERVAL);
+                filter.AddAction(ACTION_SET_SENDING_PAUSED);   // NEW
+
+                RegisterReceiver(_intervalUpdateReceiver, filter);
             }
 
             if (_commandHandler == null)
@@ -114,6 +153,9 @@ namespace Finder.Droid.Services
 
         public override void OnDestroy()
         {
+            // Only write false when the user explicitly stopped tracking.
+            // Skipping the write on other paths keeps the preference correct
+            // so BootReceiver can restart the service after a reboot.
             if (IsStoppingByUserRequest)
                 SetRunningPreference(false);
 
@@ -124,7 +166,7 @@ namespace Finder.Droid.Services
             if (_intervalUpdateReceiver != null)
             {
                 try { UnregisterReceiver(_intervalUpdateReceiver); }
-                catch { }
+                catch { /* Silent fail */ }
                 _intervalUpdateReceiver = null;
             }
 
@@ -146,6 +188,8 @@ namespace Finder.Droid.Services
             _httpClient?.Dispose();
             _httpClient = null;
 
+            // Auto-restart when the service dies for any reason other than
+            // an intentional user stop (OS memory kill, crash, etc.).
             if (!IsStoppingByUserRequest)
             {
                 try
@@ -157,10 +201,15 @@ namespace Finder.Droid.Services
                     else
                         StartService(restartIntent);
                 }
-                catch { }
+                catch { /* Silent fail */ }
             }
         }
 
+        /// <summary>
+        /// Fires when the user swipes the app away from Recent Tasks.
+        /// Schedules RestartReceiver via AlarmManager to relaunch the service
+        /// 3 seconds later, giving the OS time to finish its cleanup first.
+        /// </summary>
         public override void OnTaskRemoved(Intent rootIntent)
         {
             base.OnTaskRemoved(rootIntent);
@@ -240,6 +289,7 @@ namespace Finder.Droid.Services
                     System.Globalization.CultureInfo.InvariantCulture);
                 _currentLocation = $"{lat},{lon}";
 
+                // Always record to GeoJSON regardless of the sending-paused flag
                 _ = Task.Run(() =>
                 {
                     try { _geoJsonManager.AddLocationPoint(location, "automatic"); }
@@ -323,10 +373,7 @@ namespace Finder.Droid.Services
                 return _locationManager != null &&
                        _locationManager.IsProviderEnabled(LocationManager.GpsProvider);
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         /// <summary>
@@ -419,6 +466,18 @@ namespace Finder.Droid.Services
                 if (!string.IsNullOrEmpty(_telegramBotToken) &&
                     !string.IsNullOrEmpty(_chatId))
                 {
+                    // ── PAUSE GUARD ───────────────────────────────────────────
+                    // When the user has sent /pauselocation we skip sending to
+                    // Telegram but still update the notification bar so the
+                    // service appears healthy. GPS recording continues as normal.
+                    if (_isTelegramSendingPaused)
+                    {
+                        UpdateNotification("Finder is active — sends paused",
+                            $"Paused · {DateTime.Now:HH:mm:ss} · {_currentLocation}");
+                        return;
+                    }
+                    // ─────────────────────────────────────────────────────────
+
                     bool inMovingMode = _currentUpdateInterval == MOVING_UPDATE_INTERVAL_MS;
 
                     if (_currentLocation != "Unknown")
@@ -480,6 +539,30 @@ namespace Finder.Droid.Services
                     $"Interval updated to {newIntervalMs} ms");
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Pauses or resumes periodic Telegram location sends without stopping the service.
+        /// Called by IntervalUpdateReceiver when a SET_TELEGRAM_PAUSED broadcast arrives.
+        /// The state is persisted to SharedPreferences so it survives service restarts.
+        /// </summary>
+        public void SetTelegramSendingPaused(bool paused)
+        {
+            _isTelegramSendingPaused = paused;
+
+            // Persist so the flag survives a service restart or reboot
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
+            var editor = prefs.Edit();
+            editor.PutBoolean(PREF_KEY_SENDING_PAUSED, paused);
+            editor.Apply();
+
+            // Update the persistent notification so the user can see the state
+            if (paused)
+                UpdateNotification("Finder is active — sends paused",
+                    "GPS recording continues · Telegram sends are paused");
+            else
+                UpdateNotification("Finder is active",
+                    "Telegram location sends resumed");
         }
 
         // ── Daily GeoJSON report ──────────────────────────────────────────────
@@ -605,16 +688,9 @@ namespace Finder.Droid.Services
                     _interval = string.IsNullOrEmpty(settings.Interval)
                                         ? "60000"
                                         : settings.Interval;
-                    return;
                 }
             }
             catch { }
-
-            _telegramBotToken = null;
-            _chatId = null;
-            _interval = "60000";
-            UpdateNotification("Finder — Not configured",
-                "Open app to add Telegram credentials");
         }
 
         private AppSettings LoadSettingsFromFile()
@@ -631,49 +707,38 @@ namespace Finder.Droid.Services
 
         private void SaveSettingsToFile(AppSettings settings)
         {
-            try
-            {
-                File.WriteAllText(_settingsFilePath,
-                    JsonConvert.SerializeObject(settings));
-            }
+            try { File.WriteAllText(_settingsFilePath, JsonConvert.SerializeObject(settings)); }
             catch { }
         }
 
-        // ── Notification ──────────────────────────────────────────────────────
+        // ── Notification helpers ──────────────────────────────────────────────
 
         private void CreateNotificationChannel()
         {
             if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
-
-            var channel = new NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Finder Location Service",
-                NotificationImportance.Low)
+            try
             {
-                Description = "Shows while Finder is actively tracking your location."
-            };
-
-            ((NotificationManager)GetSystemService(NotificationService))
-                .CreateNotificationChannel(channel);
+                var channel = new NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "Finder Location Service",
+                    NotificationImportance.Low)
+                {
+                    Description = "Shows while Finder is tracking your location."
+                };
+                ((NotificationManager)GetSystemService(NotificationService))
+                    ?.CreateNotificationChannel(channel);
+            }
+            catch { }
         }
 
-        private Notification BuildNotification(string title, string text)
+        private Android.App.Notification BuildNotification(string title, string text)
         {
-            var intent = new Intent(this, typeof(MainActivity));
-            intent.SetFlags(ActivityFlags.ClearTop | ActivityFlags.SingleTop);
-
-            var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
-                ? PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable
-                : PendingIntentFlags.UpdateCurrent;
-
-            var pending = PendingIntent.GetActivity(this, 0, intent, pendingFlags);
-
             return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                 .SetContentTitle(title)
                 .SetContentText(text)
                 .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
                 .SetOngoing(true)
-                .SetContentIntent(pending)
+                .SetPriority(NotificationCompat.PriorityLow)
                 .Build();
         }
 
@@ -681,13 +746,13 @@ namespace Finder.Droid.Services
         {
             try
             {
-                NotificationManagerCompat.From(this)
-                    .Notify(SERVICE_NOTIFICATION_ID, BuildNotification(title, text));
+                var nm = (NotificationManager)GetSystemService(NotificationService);
+                nm?.Notify(SERVICE_NOTIFICATION_ID, BuildNotification(title, text));
             }
             catch { }
         }
 
-        // ── Wake lock ─────────────────────────────────────────────────────────
+        // ── WakeLock ──────────────────────────────────────────────────────────
 
         private void AcquireWakeLock()
         {
@@ -706,7 +771,7 @@ namespace Finder.Droid.Services
                 _wakeLock.Release();
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────
+        // ── Misc helpers ──────────────────────────────────────────────────────
 
         private void SetRunningPreference(bool running)
         {
@@ -739,8 +804,15 @@ namespace Finder.Droid.Services
         }
     }
 
-    // ── Broadcast receiver for dynamic interval updates ───────────────────────
+    // ── Broadcast receiver ────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Handles dynamic runtime commands sent to the running service via LocalBroadcast.
+    ///
+    /// Actions handled:
+    ///   com.finder.UPDATE_INTERVAL     → updates the Telegram send interval
+    ///   com.finder.SET_TELEGRAM_PAUSED → pauses or resumes Telegram location sends
+    /// </summary>
     public class IntervalUpdateReceiver : BroadcastReceiver
     {
         private readonly BackgroundLocationService _service;
@@ -752,8 +824,22 @@ namespace Finder.Droid.Services
 
         public override void OnReceive(Context context, Intent intent)
         {
-            if (intent?.Action == "com.finder.UPDATE_INTERVAL")
-                _service.UpdateInterval(intent.GetIntExtra("new_interval", 60000));
+            if (intent == null) return;
+
+            switch (intent.Action)
+            {
+                // Existing: update the periodic send interval
+                case BackgroundLocationService.ACTION_UPDATE_INTERVAL:
+                    int newInterval = intent.GetIntExtra("new_interval", 60000);
+                    _service.UpdateInterval(newInterval);
+                    break;
+
+                // NEW: pause or resume periodic Telegram location sends
+                case BackgroundLocationService.ACTION_SET_SENDING_PAUSED:
+                    bool paused = intent.GetBooleanExtra("paused", false);
+                    _service.SetTelegramSendingPaused(paused);
+                    break;
+            }
         }
     }
 }
