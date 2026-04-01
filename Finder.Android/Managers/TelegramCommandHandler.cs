@@ -7,7 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Android.App;
 using Android.Content;
-using Android.Locations;
 using Android.OS;
 using Android.Preferences;
 using AndroidX.Core.App;
@@ -15,6 +14,10 @@ using Finder.Droid.Services;
 using Finder.Models;
 using Newtonsoft.Json;
 using Xamarin.Essentials;
+
+// ── Alias to avoid ambiguity with Android.Gms.Location.ILocationListener ──
+using DroidLocation = Android.Locations;
+using AndroidLocation = Android.Locations.Location;
 
 namespace Finder.Droid.Managers
 {
@@ -30,8 +33,8 @@ namespace Finder.Droid.Managers
         private const int RESTART_COOLDOWN_S = 120;
 
         // ── Poll-interval defaults & limits ───────────────────────────────────
-        private const int DEFAULT_POLL_INTERVAL_MS = 60_000; // 60 s default
-        private const int MIN_POLL_INTERVAL_MS = 10_000; // 10 s minimum
+        private const int DEFAULT_POLL_INTERVAL_MS = 60_000;
+        private const int MIN_POLL_INTERVAL_MS = 10_000;
 
         // ── SharedPreferences keys ────────────────────────────────────────────
         private const string LAST_UPDATE_ID_KEY = "telegram_last_update_id";
@@ -85,12 +88,7 @@ namespace Finder.Droid.Managers
                 var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
                 bool pollingEnabled = prefs.GetBoolean(PREF_POLLING_ENABLED, true);
 
-                if (!pollingEnabled)
-                {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[TelegramCommandHandler] Polling disabled — skipping timer.");
-                    return;
-                }
+                if (!pollingEnabled) return;
 
                 int pollIntervalMs = prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS);
                 if (pollIntervalMs < MIN_POLL_INTERVAL_MS)
@@ -166,10 +164,6 @@ namespace Finder.Droid.Managers
         // GPS provider helpers
         // ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Reads the currently active GPS provider from SharedPreferences.
-        /// Returns "fused" (default) or "raw".
-        /// </summary>
         private string GetActiveGpsProvider()
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
@@ -177,19 +171,12 @@ namespace Finder.Droid.Managers
                    ?? "fused";
         }
 
-        /// <summary>
-        /// Sends a broadcast to BackgroundLocationService to switch the GPS provider.
-        /// Also persists the new value directly so it survives if the service is
-        /// temporarily not running.
-        /// </summary>
         private void BroadcastGpsProvider(string provider)
         {
-            // Persist immediately (covers the case where the service is not running)
             var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
             editor.PutString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, provider);
             editor.Apply();
 
-            // Broadcast to the live service if running
             try
             {
                 var intent = new Intent(BackgroundLocationService.ACTION_SET_GPS_PROVIDER);
@@ -255,9 +242,6 @@ namespace Finder.Droid.Managers
                 switch (cmd)
                 {
                     // ── /gpsprovider fused|raw ────────────────────────────────
-                    // Switches the GPS provider live without restarting the service.
-                    // Default is "fused" (battery-efficient).
-                    // "raw" uses the hardware GPS chip directly (max accuracy).
                     case "/gpsprovider":
                         switch (param?.ToLower())
                         {
@@ -266,7 +250,8 @@ namespace Finder.Droid.Managers
                                 response = "🔋 *GPS provider → Fused (default)*\n\n" +
                                            "Uses GPS + WiFi + cell towers.\n" +
                                            "The OS manages chip power — battery-efficient.\n\n" +
-                                           "✅ Switch applied immediately.";
+                                           "✅ Switch applied immediately.\n" +
+                                           "ℹ️ /location always uses raw GPS regardless.";
                                 break;
 
                             case "raw":
@@ -279,16 +264,12 @@ namespace Finder.Droid.Managers
                                 break;
 
                             default:
-                                string current = GetActiveGpsProvider();
-                                string currentLabel = current == "raw"
-                                    ? "🛰 Raw GPS (max accuracy)"
-                                    : "🔋 Fused (battery saver, default)";
+                                string cur = GetActiveGpsProvider();
                                 response = $"📡 *GPS Provider*\n\n" +
-                                           $"Current: {currentLabel}\n\n" +
-                                           $"Usage:\n" +
-                                           $"/gpsprovider fused — battery-efficient (default)\n" +
-                                           $"/gpsprovider raw   — hardware GPS chip (max accuracy)\n\n" +
-                                           $"The setting is saved and survives service restarts.";
+                                           $"Current: {(cur == "raw" ? "🛰 Raw GPS" : "🔋 Fused (default)")}\n\n" +
+                                           "/gpsprovider fused — battery-efficient (default)\n" +
+                                           "/gpsprovider raw   — hardware GPS (max accuracy)\n\n" +
+                                           "ℹ️ /location *always* uses raw GPS for best accuracy.";
                                 break;
                         }
                         break;
@@ -297,7 +278,7 @@ namespace Finder.Droid.Managers
                     case "/interval":
                         if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
                         {
-                            response = $"⏳ Cooldown active. Wait {INTERVAL_COOLDOWN_S}s between changes.";
+                            response = $"⏳ Cooldown active. Wait {INTERVAL_COOLDOWN_S}s.";
                             break;
                         }
                         if (!string.IsNullOrEmpty(param) &&
@@ -308,7 +289,7 @@ namespace Finder.Droid.Managers
                             SaveSettings(currentSettings);
                             await SecureStorage.SetAsync("Interval", ivMs.ToString());
 
-                            var bIntent = new Intent("com.finder.UPDATE_INTERVAL");
+                            var bIntent = new Intent(BackgroundLocationService.ACTION_UPDATE_INTERVAL);
                             bIntent.PutExtra("new_interval", ivMs);
                             _context.SendBroadcast(bIntent);
 
@@ -316,7 +297,7 @@ namespace Finder.Droid.Managers
                         }
                         else
                         {
-                            response = "❌ Usage: /interval [milliseconds] (min 5000)";
+                            response = "❌ Usage: /interval [ms] (min 5000)";
                         }
                         break;
 
@@ -327,23 +308,19 @@ namespace Finder.Droid.Managers
                             case "off":
                                 SetPollingEnabled(false);
                                 Stop();
-                                response = "⏸ *Telegram polling disabled*\n\n" +
-                                           "No more command polls — zero network calls.\n" +
+                                response = "⏸ *Polling disabled* — zero network calls.\n" +
                                            "⚠️ Re-enable from the app or restart tracking.";
                                 break;
                             case "on":
                                 SetPollingEnabled(true);
                                 int ci = GetSavedPollIntervalMs();
                                 RestartPollTimer(ci);
-                                response = $"▶️ *Telegram polling enabled*\n\n" +
-                                           $"Polling every {ci / 1000}s.\n" +
-                                           $"Use /pollinterval [sec] to change.";
+                                response = $"▶️ *Polling enabled* — every {ci / 1000}s.";
                                 break;
                             default:
                                 bool en = IsPollingEnabled();
-                                response = $"📡 Polling is *{(en ? "ON ✅" : "OFF ⏸")}*\n\n" +
-                                           "/polling on  — enable\n" +
-                                           "/polling off — disable (saves battery)";
+                                response = $"📡 Polling: *{(en ? "ON ✅" : "OFF ⏸")}*\n" +
+                                           "/polling on|off";
                                 break;
                         }
                         break;
@@ -360,25 +337,20 @@ namespace Finder.Droid.Managers
                                     .GetDefaultSharedPreferences(_context).Edit();
                                 ed.PutInt(PREF_POLL_INTERVAL_MS, pollMs);
                                 ed.Apply();
-                                response = $"💾 Poll interval saved as {pollSec}s.\n" +
-                                           "⚠️ Polling is OFF — applies on /polling on.";
+                                response = $"💾 Saved {pollSec}s — applies on /polling on.";
                             }
                             else
                             {
                                 RestartPollTimer(pollMs);
-                                response = $"🔄 Poll interval → *{pollSec}s*\n\n" +
-                                           "💡 60s = balanced · 120s = saver · 10s = fastest";
+                                response = $"🔄 Poll interval → *{pollSec}s*\n" +
+                                           "60s = balanced · 120s = saver · 10s = fastest";
                             }
                         }
                         else
                         {
-                            int cur = GetSavedPollIntervalMs() / 1000;
+                            int curSec = GetSavedPollIntervalMs() / 1000;
                             response = $"❌ Usage: /pollinterval [sec] (min 10)\n" +
-                                       $"Current: *{cur}s*\n\n" +
-                                       "Examples:\n" +
-                                       "/pollinterval 10  — every 10s\n" +
-                                       "/pollinterval 60  — every 1 min (default)\n" +
-                                       "/pollinterval 120 — every 2 min";
+                                       $"Current: *{curSec}s*";
                         }
                         break;
 
@@ -386,11 +358,10 @@ namespace Finder.Droid.Managers
                     case "/status":
                         var statusFiles = _geoJsonManager.GetAvailableDataFiles();
                         bool sendsPaused = IsTelegramSendingPaused();
-                        bool autoStart = Xamarin.Essentials.Preferences.Get(
-                                                  Finder.ViewModels.MainViewModel.PREF_AUTO_START,
-                                                  false);
+                        bool autoStart = Preferences.Get(
+                            Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
                         bool pollEnabled = IsPollingEnabled();
-                        int pollIntervalSec = GetSavedPollIntervalMs() / 1000;
+                        int pollSecs = GetSavedPollIntervalMs() / 1000;
                         string activeProvider = GetActiveGpsProvider();
                         string providerLabel = activeProvider == "raw"
                             ? "🛰 Raw GPS (max accuracy)"
@@ -400,7 +371,7 @@ namespace Finder.Droid.Managers
                                    $"Tracking:        {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
                                    $"GPS provider:    {providerLabel}\n" +
                                    $"Telegram sends:  {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
-                                   $"Command polling: {(pollEnabled ? $"✅ Every {pollIntervalSec}s" : "⏸ Disabled")}\n" +
+                                   $"Command polling: {(pollEnabled ? $"✅ Every {pollSecs}s" : "⏸ Disabled")}\n" +
                                    $"Auto-start:      {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
                                    $"Token:           {MaskToken(currentSettings.BotToken)}\n" +
                                    $"Chat ID:         {currentSettings.ChatId}\n" +
@@ -408,11 +379,11 @@ namespace Finder.Droid.Managers
                                    $"Data files:      {statusFiles.Count}\n" +
                                    $"Device time:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
 
-                        if (sendsPaused) response += "\n\n💡 /resumelocation to resume sends.";
-                        if (!pollEnabled) response += "\n💡 /polling on to re-enable polling.";
-                        if (!autoStart) response += "\n💡 /autostart on to enable auto-start.";
+                        if (sendsPaused) response += "\n\n💡 /resumelocation to resume.";
+                        if (!pollEnabled) response += "\n💡 /polling on to re-enable.";
+                        if (!autoStart) response += "\n💡 /autostart on to enable.";
                         if (activeProvider == "raw")
-                            response += "\n⚡ Raw GPS is active — higher battery drain.";
+                            response += "\n⚡ Raw GPS active — higher battery drain.";
                         break;
 
                     // ── /start ───────────────────────────────────────────────
@@ -431,9 +402,9 @@ namespace Finder.Droid.Managers
                     case "/restart":
                         if ((DateTime.Now - _lastRestartCommand).TotalSeconds < RESTART_COOLDOWN_S)
                         {
-                            int remaining = RESTART_COOLDOWN_S -
+                            int rem = RESTART_COOLDOWN_S -
                                 (int)(DateTime.Now - _lastRestartCommand).TotalSeconds;
-                            response = $"⏳ Wait {remaining}s before restarting.";
+                            response = $"⏳ Wait {rem}s before restarting.";
                             break;
                         }
                         _lastRestartCommand = DateTime.Now;
@@ -502,7 +473,7 @@ namespace Finder.Droid.Managers
                         var files = _geoJsonManager.GetAvailableDataFiles();
                         response = files.Count == 0
                             ? "📂 No data files found."
-                            : "📂 *Available data files:*\n" +
+                            : "📂 *Available files:*\n" +
                               string.Join("\n", files.Select(f => $"• {Path.GetFileName(f)}"));
                         break;
 
@@ -523,11 +494,11 @@ namespace Finder.Droid.Managers
                         string gpsProv = GetActiveGpsProvider();
 
                         response = "📡 *GPS Status*\n" +
-                                   $"GPS chip:     {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
-                                   $"Provider:     {(gpsProv == "raw" ? "🛰 Raw GPS" : "🔋 Fused")}\n" +
-                                   $"Service:      {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
-                                   $"Battery:      {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
-                                   $"Time:         {DateTime.Now:HH:mm:ss}";
+                                   $"GPS chip:  {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
+                                   $"Provider:  {(gpsProv == "raw" ? "🛰 Raw GPS" : "🔋 Fused")}\n" +
+                                   $"Service:   {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
+                                   $"Battery:   {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
+                                   $"Time:      {DateTime.Now:HH:mm:ss}";
                         if (!gpsOn)
                             response += "\n\n💡 /enablelocation to request GPS activation.";
                         break;
@@ -541,13 +512,12 @@ namespace Finder.Droid.Managers
                         else
                         {
                             ShowEnableLocationNotification();
-                            response = "📲 *Action required on the device*\n\n" +
-                                       "A notification has been sent.\n" +
-                                       "Tap it to open Location Settings.";
+                            response = "📲 Notification sent — tap it to open Location Settings.";
                         }
                         break;
 
                     // ── /location ────────────────────────────────────────────
+                    // Always uses raw GPS regardless of the active provider setting.
                     case "/location":
                         await HandleLocationCommandAsync(currentSettings);
                         response = null;
@@ -562,7 +532,7 @@ namespace Finder.Droid.Managers
                         else
                         {
                             BroadcastSendingPaused(true);
-                            response = "⏸ *Location sends paused*\n\n" +
+                            response = "⏸ *Location sends paused*\n" +
                                        "GPS + GeoJSON still running.\n" +
                                        "Send /resumelocation to turn back on.";
                         }
@@ -577,7 +547,7 @@ namespace Finder.Droid.Managers
                         else
                         {
                             BroadcastSendingPaused(false);
-                            response = "▶️ *Location sends resumed*";
+                            response = "▶️ *Location sends resumed.*";
                         }
                         break;
 
@@ -586,12 +556,12 @@ namespace Finder.Droid.Managers
                         switch (param?.ToLower())
                         {
                             case "on":
-                                Xamarin.Essentials.Preferences.Set(
+                                Preferences.Set(
                                     Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
                                 response = "✅ Auto-start enabled.";
                                 break;
                             case "off":
-                                Xamarin.Essentials.Preferences.Set(
+                                Preferences.Set(
                                     Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
                                 response = "❌ Auto-start disabled.";
                                 break;
@@ -606,33 +576,25 @@ namespace Finder.Droid.Managers
                     default:
                         response = "📋 *Available commands:*\n\n" +
                                    "📍 *Tracking*\n" +
-                                   "/start — Start tracking\n" +
-                                   "/stop — Stop tracking\n" +
-                                   "/restart — Restart service\n" +
-                                   "/status — Full status report\n" +
-                                   "/location — Get current location now\n" +
-                                   "/autostart on|off — Auto-start on app open\n\n" +
+                                   "/start · /stop · /restart · /status\n" +
+                                   "/autostart on|off\n\n" +
                                    "🛰 *GPS Provider*\n" +
-                                   "/gpsprovider fused — Battery-efficient (default)\n" +
-                                   "/gpsprovider raw   — Hardware GPS (max accuracy)\n" +
-                                   "/gpsstatus         — GPS chip + provider info\n" +
-                                   "/enablelocation    — Request GPS activation\n\n" +
+                                   "/gpsprovider fused — battery-efficient (default)\n" +
+                                   "/gpsprovider raw   — hardware GPS (max accuracy)\n" +
+                                   "/gpsstatus · /enablelocation\n" +
+                                   "/location — current fix *(always raw GPS)*\n\n" +
                                    "📡 *Polling*\n" +
-                                   "/polling on|off       — Enable/disable command polling\n" +
-                                   "/pollinterval [sec]   — Set poll frequency (min 10s)\n\n" +
+                                   "/polling on|off\n" +
+                                   "/pollinterval [sec] (min 10)\n\n" +
                                    "📤 *Location sends*\n" +
-                                   "/interval [ms]    — Set send interval (min 5000)\n" +
-                                   "/pauselocation    — Pause Telegram sends\n" +
-                                   "/resumelocation   — Resume Telegram sends\n\n" +
+                                   "/interval [ms] (min 5000)\n" +
+                                   "/pauselocation · /resumelocation\n\n" +
                                    "📂 *Data*\n" +
-                                   "/today            — Today's GeoJSON\n" +
-                                   "/yesterday        — Yesterday's GeoJSON\n" +
-                                   "/report YYYY-MM-DD — Specific date\n" +
-                                   "/files            — List data files\n" +
-                                   "/cleanup [days]   — Delete old files\n\n" +
+                                   "/today · /yesterday\n" +
+                                   "/report YYYY-MM-DD\n" +
+                                   "/files · /cleanup [days]\n\n" +
                                    "⚙️ *Config*\n" +
-                                   "/token [token]    — Change bot token\n" +
-                                   "/chatid [id]      — Change chat ID";
+                                   "/token [token] · /chatid [id]";
                         break;
                 }
 
@@ -644,58 +606,48 @@ namespace Finder.Droid.Managers
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // /location handler
-        // ─────────────────────────────────────────────────────────────────────
-
-        // ─────────────────────────────────────────────────────────────────────
-        // /location handler
-        // Always uses raw GPS regardless of the active provider setting.
-        // Reason: /location is an on-demand fix — the user wants the most
-        // accurate position possible right now, not a cached or fused estimate.
+        // /location handler — ALWAYS uses raw GPS regardless of active provider
         // ─────────────────────────────────────────────────────────────────────
 
         private async Task HandleLocationCommandAsync(AppSettings settings)
         {
             await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                 "📡 Fetching current location via raw GPS…");
-
             try
             {
-                Android.Locations.Location rawLocation = null;
+                AndroidLocation rawLocation = null;
 
-                // ── Step 1: try the last known raw GPS fix (zero battery cost) ────
+                // Step 1: try last known raw GPS fix (zero battery cost)
                 try
                 {
-                    var locationManager = (LocationManager)_context
+                    var lm = (DroidLocation.LocationManager)_context
                         .GetSystemService(Context.LocationService);
 
-                    if (locationManager != null &&
-                        locationManager.IsProviderEnabled(LocationManager.GpsProvider))
+                    if (lm != null &&
+                        lm.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider))
                     {
-                        rawLocation = locationManager
-                            .GetLastKnownLocation(LocationManager.GpsProvider);
+                        rawLocation = lm.GetLastKnownLocation(
+                            DroidLocation.LocationManager.GpsProvider);
                     }
                 }
-                catch { /* fall through to Step 2 */ }
+                catch { }
 
-                // ── Step 2: if no cached fix, request a fresh raw GPS fix ─────────
-                // Uses a one-shot SingleLocationListener with a 15-second timeout.
-                if (rawLocation == null ||
-                    (DateTime.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(
-                        rawLocation.Time).UtcDateTime).TotalSeconds > 30)
-                {
+                // Step 2: stale or missing — request a fresh raw fix (15 s timeout)
+                bool isStale = rawLocation != null &&
+                    (DateTime.UtcNow -
+                     DateTimeOffset.FromUnixTimeMilliseconds(rawLocation.Time).UtcDateTime)
+                    .TotalSeconds > 30;
+
+                if (rawLocation == null || isStale)
                     rawLocation = await GetFreshRawGpsFixAsync(timeoutSeconds: 15);
-                }
 
-                // ── Step 3: if raw GPS failed entirely, fall back to Essentials ───
-                // This can happen when GPS is disabled or has no satellite view.
+                // Step 3: raw GPS timed out — fall back to Essentials
                 if (rawLocation == null)
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                         "⚠️ Raw GPS timed out — falling back to last known location…");
 
-                    var fallback = await Xamarin.Essentials.Geolocation
-                        .GetLastKnownLocationAsync();
+                    var fallback = await Geolocation.GetLastKnownLocationAsync();
 
                     if (fallback == null)
                     {
@@ -722,26 +674,21 @@ namespace Finder.Droid.Managers
                     return;
                 }
 
-                // ── Step 4: send the raw GPS fix to Telegram ──────────────────────
+                // Step 4: send raw GPS fix
                 string lat = rawLocation.Latitude.ToString(CultureInfo.InvariantCulture);
                 string lon = rawLocation.Longitude.ToString(CultureInfo.InvariantCulture);
                 string maps = $"https://www.google.com/maps?q={lat},{lon}";
                 string age = GetFixAgeDescription(rawLocation.Time);
 
-                // Send native Telegram map card
+                string accuracy = rawLocation.HasAccuracy
+                    ? $"{rawLocation.Accuracy:F0} m" : "unknown";
+                string speed = rawLocation.HasSpeed
+                    ? $"{rawLocation.Speed * 3.6:F1} km/h" : "—";
+
                 await _httpClient.GetStringAsync(
                     $"https://api.telegram.org/bot{settings.BotToken}" +
                     $"/sendLocation?chat_id={settings.ChatId}" +
                     $"&latitude={lat}&longitude={lon}");
-
-                // Send details text
-                string accuracy = rawLocation.HasAccuracy
-                    ? $"{rawLocation.Accuracy:F0} m"
-                    : "unknown";
-
-                string speed = rawLocation.HasSpeed
-                    ? $"{rawLocation.Speed * 3.6:F1} km/h"
-                    : "—";
 
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                     $"📍 *Current Location* _(raw GPS)_\n" +
@@ -760,44 +707,41 @@ namespace Finder.Droid.Managers
         }
 
         /// <summary>
-        /// Requests a single fresh raw GPS fix using a TaskCompletionSource-backed
-        /// ILocationListener. Waits up to <paramref name="timeoutSeconds"/> seconds.
-        /// Returns null if no fix arrives before the timeout.
+        /// Requests a single fresh raw GPS fix via a one-shot ILocationListener.
+        /// Returns null if no fix arrives within <paramref name="timeoutSeconds"/>.
+        /// Uses positional long/float args — no named parameters (avoids CS1739).
         /// </summary>
-        private Task<Android.Locations.Location> GetFreshRawGpsFixAsync(int timeoutSeconds)
+        private Task<AndroidLocation> GetFreshRawGpsFixAsync(int timeoutSeconds)
         {
-            var tcs = new TaskCompletionSource<Android.Locations.Location>();
+            var tcs = new TaskCompletionSource<AndroidLocation>();
 
             try
             {
-                var locationManager = (LocationManager)_context
+                var lm = (DroidLocation.LocationManager)_context
                     .GetSystemService(Context.LocationService);
 
-                if (locationManager == null ||
-                    !locationManager.IsProviderEnabled(LocationManager.GpsProvider))
+                if (lm == null ||
+                    !lm.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider))
                 {
                     tcs.TrySetResult(null);
                     return tcs.Task;
                 }
 
-                // Inline one-shot listener — removes itself after the first fix
                 var listener = new SingleShotLocationListener(fix =>
-                {
-                    tcs.TrySetResult(fix);
-                });
+                    tcs.TrySetResult(fix));
 
-                // Request a single update — min time 0, min distance 0
-                locationManager.RequestLocationUpdates(
-                    LocationManager.GpsProvider,
-                    minTime: 0,
-                    minDistance: 0f,
-                    listener,
-                    Android.OS.Looper.MainLooper);
+                // Positional args: provider, minTimeMs (long), minDistanceM (float), listener
+                // Named parameters not supported by Xamarin binding — use positional only
+                lm.RequestLocationUpdates(
+                    DroidLocation.LocationManager.GpsProvider,
+                    0L,    // minTimeMs — long
+                    0f,    // minDistanceM — float
+                    listener);
 
-                // Timeout guard — removes listener if no fix arrives in time
+                // Timeout guard
                 Task.Delay(timeoutSeconds * 1000).ContinueWith(_ =>
                 {
-                    try { locationManager.RemoveUpdates(listener); }
+                    try { lm.RemoveUpdates(listener); }
                     catch { }
                     tcs.TrySetResult(null);
                 });
@@ -810,16 +754,13 @@ namespace Finder.Droid.Managers
             return tcs.Task;
         }
 
-        /// <summary>
-        /// Returns a human-readable description of how old a GPS fix is.
-        /// </summary>
+        /// <summary>Returns a human-readable description of how old a GPS fix is.</summary>
         private static string GetFixAgeDescription(long fixTimeMs)
         {
             try
             {
-                var fixTime = DateTimeOffset.FromUnixTimeMilliseconds(fixTimeMs).UtcDateTime;
-                var age = DateTime.UtcNow - fixTime;
-
+                var age = DateTime.UtcNow -
+                          DateTimeOffset.FromUnixTimeMilliseconds(fixTimeMs).UtcDateTime;
                 if (age.TotalSeconds < 5) return "just now";
                 if (age.TotalSeconds < 60) return $"{(int)age.TotalSeconds}s ago";
                 if (age.TotalMinutes < 60) return $"{(int)age.TotalMinutes} min ago";
@@ -910,13 +851,15 @@ namespace Finder.Droid.Managers
         private bool IsTelegramSendingPaused()
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetBoolean(BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, false);
+            return prefs.GetBoolean(
+                BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, false);
         }
 
         private void BroadcastSendingPaused(bool paused)
         {
             var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
-            editor.PutBoolean(BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, paused);
+            editor.PutBoolean(
+                BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, paused);
             editor.Apply();
 
             try
@@ -936,9 +879,9 @@ namespace Finder.Droid.Managers
         {
             try
             {
-                var lm = (LocationManager)_context
+                var lm = (DroidLocation.LocationManager)_context
                     .GetSystemService(Context.LocationService);
-                return lm?.IsProviderEnabled(LocationManager.GpsProvider) == true;
+                return lm?.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider) == true;
             }
             catch { return false; }
         }
@@ -963,14 +906,14 @@ namespace Finder.Droid.Managers
                 var intent = new Intent(
                     Android.Provider.Settings.ActionLocationSourceSettings);
                 intent.AddFlags(ActivityFlags.NewTask);
+
                 var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
                     ? PendingIntentFlags.Immutable
                     : (PendingIntentFlags)0;
                 var pendingIntent = PendingIntent.GetActivity(
                     _context, 0, intent, pendingFlags);
 
-                var builder = new NotificationCompat.Builder(
-                        _context, GPS_ALERT_CHANNEL_ID)
+                var builder = new NotificationCompat.Builder(_context, GPS_ALERT_CHANNEL_ID)
                     .SetContentTitle("Enable GPS")
                     .SetContentText("Tap to open Location Settings")
                     .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
@@ -1057,34 +1000,36 @@ namespace Finder.Droid.Managers
             }
             catch { }
         }
+    }
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // SingleShotLocationListener
-        // One-shot ILocationListener used only by /location command.
-        // Removes itself from LocationManager after the first fix arrives.
-        // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // SingleShotLocationListener
+    // One-shot raw GPS listener used exclusively by the /location command.
+    // Implements DroidLocation.ILocationListener to avoid Gms namespace clash.
+    // ─────────────────────────────────────────────────────────────────────────
 
-        internal class SingleShotLocationListener : Java.Lang.Object, ILocationListener
+    internal class SingleShotLocationListener
+        : Java.Lang.Object, DroidLocation.ILocationListener
+    {
+        private readonly Action<AndroidLocation> _onFix;
+        private bool _delivered = false;
+
+        public SingleShotLocationListener(Action<AndroidLocation> onFix)
+            => _onFix = onFix;
+
+        public void OnLocationChanged(AndroidLocation location)
         {
-            private readonly Action<Android.Locations.Location> _onFix;
-            private bool _delivered = false;
-
-            public SingleShotLocationListener(Action<Android.Locations.Location> onFix)
-                => _onFix = onFix;
-
-            public void OnLocationChanged(Android.Locations.Location location)
-            {
-                // Guard against duplicate callbacks
-                if (_delivered) return;
-                _delivered = true;
-                _onFix?.Invoke(location);
-            }
-
-            public void OnProviderDisabled(string provider) { }
-            public void OnProviderEnabled(string provider) { }
-            public void OnStatusChanged(string provider,
-                Availability status, Bundle extras)
-            { }
+            if (_delivered) return;
+            _delivered = true;
+            _onFix?.Invoke(location);
         }
+
+        public void OnProviderDisabled(string provider) { }
+        public void OnProviderEnabled(string provider) { }
+        public void OnStatusChanged(
+            string provider,
+            DroidLocation.Availability status,
+            Android.OS.Bundle extras)
+        { }
     }
 }
