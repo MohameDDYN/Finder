@@ -5,7 +5,8 @@ using System.Threading.Tasks;
 using System.Timers;
 using Android.App;
 using Android.Content;
-using Android.Locations;
+using Android.Gms.Location;           // FusedLocationProvider
+using Android.Locations;              // LocationManager + ILocationListener
 using Android.OS;
 using Android.Preferences;
 using AndroidX.Core.App;
@@ -17,22 +18,35 @@ using AndroidLocation = Android.Locations.Location;
 
 namespace Finder.Droid.Services
 {
+    /// <summary>
+    /// Background foreground service that tracks the device location and
+    /// forwards it to Telegram.
+    ///
+    /// GPS provider can be switched live via Telegram command /gpsprovider:
+    ///   fused — FusedLocationProviderClient (default, battery-efficient)
+    ///   raw   — Android LocationManager GpsProvider (maximum accuracy)
+    ///
+    /// The active provider is persisted in SharedPreferences so the choice
+    /// survives service restarts and device reboots.
+    /// </summary>
     [Service(ForegroundServiceType = Android.Content.PM.ForegroundService.TypeLocation)]
     public class BackgroundLocationService : Service, ILocationListener
     {
+        // ── Static state ──────────────────────────────────────────────────────
+
         /// <summary>
-        /// Set to true before calling StopService() when the user intentionally stops tracking.
-        /// OnDestroy() reads this flag to decide whether to auto-restart the service
-        /// and whether to write false to SharedPreferences.
+        /// Set to true before calling StopService() when the user intentionally
+        /// stops tracking. OnDestroy() reads this to skip the auto-restart logic.
         /// </summary>
         public static bool IsStoppingByUserRequest = false;
 
         /// <summary>
         /// True while this service instance is alive in the current process.
-        /// WatchdogJobService checks this to detect an unexpected service death.
+        /// WatchdogJobService checks this to detect an unexpected death.
         /// </summary>
         public static bool IsRunning = false;
 
+        // ── Notification constants ─────────────────────────────────────────────
         public const int SERVICE_NOTIFICATION_ID = 1001;
         private const string NOTIFICATION_CHANNEL_ID = "finder_location_channel";
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
@@ -42,33 +56,56 @@ namespace Finder.Droid.Services
         private const string PREF_KEY_RUNNING = "is_tracking_service_running";
         private const string PREF_KEY_SENDING_PAUSED = "is_telegram_sending_paused";
 
+        /// <summary>
+        /// Stores the active GPS provider: "fused" (default) or "raw".
+        /// Read by TelegramCommandHandler to show in /status.
+        /// </summary>
+        public const string PREF_KEY_GPS_PROVIDER = "gps_provider_mode";
+
+        /// <summary>Public alias used by TelegramCommandHandler.</summary>
+        public const string PREF_KEY_SENDING_PAUSED_PUBLIC = "is_telegram_sending_paused";
+
         // ── Broadcast actions ──────────────────────────────────────────────────
-        // Existing: interval updates
         public const string ACTION_UPDATE_INTERVAL = "com.finder.UPDATE_INTERVAL";
-        // NEW: pause / resume periodic Telegram location sends
         public const string ACTION_SET_SENDING_PAUSED = "com.finder.SET_TELEGRAM_PAUSED";
 
-        private const int STATIONARY_UPDATE_INTERVAL_MS = 60000;
-        private const int MOVING_UPDATE_INTERVAL_MS = 20000;
+        /// <summary>
+        /// Broadcast sent by TelegramCommandHandler to switch the GPS provider.
+        /// Extra: "provider" (string) — "fused" or "raw"
+        /// </summary>
+        public const string ACTION_SET_GPS_PROVIDER = "com.finder.SET_GPS_PROVIDER";
+
+        // ── GPS update thresholds ──────────────────────────────────────────────
+        private const int STATIONARY_UPDATE_INTERVAL_MS = 60_000; // 1 min
+        private const int MOVING_UPDATE_INTERVAL_MS = 20_000; // 20 s
         private const float SIGNIFICANT_MOVEMENT_METERS = 25f;
 
+        // ── GPS provider fields ────────────────────────────────────────────────
+
+        /// <summary>Current active provider: "fused" or "raw".</summary>
+        private string _gpsProviderMode = "fused";
+
+        // Fused (battery-efficient, default)
+        private FusedLocationProviderClient _fusedClient;
+        private FusedLocationCallback _fusedCallback;
+
+        // Raw GPS (ILocationListener — implemented by this class)
+        private LocationManager _locationManager;
+
+        // ── Common location state ──────────────────────────────────────────────
         private AndroidLocation _lastSignificantLocation;
         private int _currentUpdateInterval = STATIONARY_UPDATE_INTERVAL_MS;
-        private LocationManager _locationManager;
+        private string _currentLocation = "Unknown";
+
+        // ── Other service state ────────────────────────────────────────────────
         private Timer _telegramTimer;
         private Timer _dailyGeoJsonTimer;
         private HttpClient _httpClient;
-        private string _currentLocation = "Unknown";
+
         private PowerManager.WakeLock _wakeLock;
         private bool _isProcessingLocation = false;
         private int _updateCounter = 0;
 
-        /// <summary>
-        /// When true the periodic Telegram location sends are suppressed.
-        /// The GPS recording and service continue unaffected.
-        /// Toggled by /pauselocation and /resumelocation commands via broadcast.
-        /// Persisted in SharedPreferences so it survives service restarts and reboots.
-        /// </summary>
         private bool _isTelegramSendingPaused = false;
 
         private GeoJsonManager _geoJsonManager;
@@ -79,7 +116,6 @@ namespace Finder.Droid.Services
         private string _chatId;
         private string _interval;
 
-        // Single JSON settings file shared between the UI layer and all Android components.
         private readonly string _settingsFilePath;
 
         public BackgroundLocationService()
@@ -104,22 +140,22 @@ namespace Finder.Droid.Services
 
             LoadSettings();
 
-            // Restore the paused state that may have been set before a restart
             var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
             _isTelegramSendingPaused = prefs.GetBoolean(PREF_KEY_SENDING_PAUSED, false);
 
+            // Restore the saved GPS provider (default: "fused")
+            _gpsProviderMode = prefs.GetString(PREF_KEY_GPS_PROVIDER, "fused") ?? "fused";
+
             _geoJsonManager = new GeoJsonManager(this);
 
-            // Register the broadcast receiver for both interval updates and
-            // the new pause/resume actions using a multi-action IntentFilter.
+            // Register receiver for all broadcast actions
             if (_intervalUpdateReceiver == null)
             {
                 _intervalUpdateReceiver = new IntervalUpdateReceiver(this);
-
                 var filter = new IntentFilter();
                 filter.AddAction(ACTION_UPDATE_INTERVAL);
-                filter.AddAction(ACTION_SET_SENDING_PAUSED);   // NEW
-
+                filter.AddAction(ACTION_SET_SENDING_PAUSED);
+                filter.AddAction(ACTION_SET_GPS_PROVIDER);   // ← new action
                 RegisterReceiver(_intervalUpdateReceiver, filter);
             }
 
@@ -145,7 +181,7 @@ namespace Finder.Droid.Services
             SetupDailyGeoJsonTimer();
             WatchdogJobService.Schedule(this);
 
-            _locationManager = GetSystemService(LocationService) as LocationManager;
+            // Start whichever provider was saved
             StartLocationUpdates();
 
             return StartCommandResult.Sticky;
@@ -153,9 +189,6 @@ namespace Finder.Droid.Services
 
         public override void OnDestroy()
         {
-            // Only write false when the user explicitly stopped tracking.
-            // Skipping the write on other paths keeps the preference correct
-            // so BootReceiver can restart the service after a reboot.
             if (IsStoppingByUserRequest)
                 SetRunningPreference(false);
 
@@ -166,7 +199,7 @@ namespace Finder.Droid.Services
             if (_intervalUpdateReceiver != null)
             {
                 try { UnregisterReceiver(_intervalUpdateReceiver); }
-                catch { /* Silent fail */ }
+                catch { }
                 _intervalUpdateReceiver = null;
             }
 
@@ -182,14 +215,17 @@ namespace Finder.Droid.Services
             _commandHandler?.Stop();
             _commandHandler = null;
 
-            _locationManager?.RemoveUpdates(this);
-            _locationManager = null;
+            // Stop whichever provider is active
+            StopLocationUpdates();
+
+            // Flush any buffered GeoJSON points before shutting down
+            try { _geoJsonManager?.FlushBuffer(); }
+            catch { }
 
             _httpClient?.Dispose();
             _httpClient = null;
 
-            // Auto-restart when the service dies for any reason other than
-            // an intentional user stop (OS memory kill, crash, etc.).
+            // Auto-restart on unexpected death (OS kill, crash, etc.)
             if (!IsStoppingByUserRequest)
             {
                 try
@@ -201,14 +237,14 @@ namespace Finder.Droid.Services
                     else
                         StartService(restartIntent);
                 }
-                catch { /* Silent fail */ }
+                catch { }
             }
         }
 
         /// <summary>
         /// Fires when the user swipes the app away from Recent Tasks.
-        /// Schedules RestartReceiver via AlarmManager to relaunch the service
-        /// 3 seconds later, giving the OS time to finish its cleanup first.
+        /// Uses SetExact (not SetExactAndAllowWhileIdle) so the device
+        /// is NOT forced out of Doze — WatchdogJobService is the safety net.
         /// </summary>
         public override void OnTaskRemoved(Intent rootIntent)
         {
@@ -232,49 +268,231 @@ namespace Finder.Droid.Services
                     ApplicationContext, 0, restartIntent, pendingFlags);
 
                 var alarmManager = (AlarmManager)GetSystemService(AlarmService);
-                long triggerAt = SystemClock.ElapsedRealtime() + 3000;
+                long triggerAt = SystemClock.ElapsedRealtime() + 5000;
 
-                if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
-                    alarmManager.SetExactAndAllowWhileIdle(
-                        AlarmType.ElapsedRealtime, triggerAt, pendingIntent);
-                else
-                    alarmManager.SetExact(
-                        AlarmType.ElapsedRealtime, triggerAt, pendingIntent);
+                // SetExact — respects Doze, no battery bypass
+                alarmManager.SetExact(AlarmType.ElapsedRealtime, triggerAt, pendingIntent);
             }
             catch { }
         }
 
-        // ── GPS / ILocationListener ───────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // GPS provider switching — public API called by IntervalUpdateReceiver
+        // ═════════════════════════════════════════════════════════════════════
 
+        /// <summary>
+        /// Switches the active GPS provider at runtime without restarting the service.
+        /// Called from IntervalUpdateReceiver when ACTION_SET_GPS_PROVIDER is received.
+        /// The new provider is persisted to SharedPreferences immediately.
+        /// </summary>
+        /// <param name="provider">"fused" or "raw"</param>
+        public void SetGpsProvider(string provider)
+        {
+            string normalized = provider?.ToLower()?.Trim() ?? "fused";
+            if (normalized != "fused" && normalized != "raw") return;
+            if (normalized == _gpsProviderMode) return; // already active, nothing to do
+
+            // Stop the currently active provider
+            StopLocationUpdates();
+
+            // Switch to the new one
+            _gpsProviderMode = normalized;
+
+            // Persist so the choice survives restart / reboot
+            var editor = PreferenceManager.GetDefaultSharedPreferences(this).Edit();
+            editor.PutString(PREF_KEY_GPS_PROVIDER, normalized);
+            editor.Apply();
+
+            // Start the new provider
+            StartLocationUpdates();
+
+            // Update the notification so the user can see the active mode
+            string label = normalized == "fused" ? "Fused (battery saver)" : "Raw GPS (max accuracy)";
+            UpdateNotification("Finder is active", $"GPS provider: {label}");
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[BackgroundLocationService] GPS provider switched to: {normalized}");
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Location updates — start / stop / restart (provider-aware)
+        // ═════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Starts location updates using whichever provider is currently active.
+        /// </summary>
         private void StartLocationUpdates()
         {
-            if (_locationManager == null) return;
+            if (_gpsProviderMode == "raw")
+                StartRawGpsUpdates();
+            else
+                StartFusedUpdates();
+        }
+
+        /// <summary>
+        /// Stops location updates for whichever provider is currently active.
+        /// </summary>
+        private void StopLocationUpdates()
+        {
+            StopFusedUpdates();
+            StopRawGpsUpdates();
+        }
+
+        /// <summary>
+        /// Restarts location updates (used when the adaptive interval changes).
+        /// </summary>
+        private void RestartLocationUpdates()
+        {
+            StopLocationUpdates();
+            StartLocationUpdates();
+        }
+
+        // ── FusedLocationProvider (default — battery-efficient) ───────────────
+
+        private void StartFusedUpdates()
+        {
             if (CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation)
                 != Android.Content.PM.Permission.Granted) return;
 
             try
             {
-                _locationManager.RequestLocationUpdates(
-                    LocationManager.GpsProvider,
-                    _currentUpdateInterval,
-                    SIGNIFICANT_MOVEMENT_METERS,
-                    this);
+                _fusedCallback = new FusedLocationCallback(this);
+                _fusedClient = LocationServices.GetFusedLocationProviderClient(this);
 
-                var lastKnown = _locationManager
-                    .GetLastKnownLocation(LocationManager.GpsProvider);
-                if (lastKnown != null)
-                {
-                    _lastSignificantLocation = lastKnown;
-                    OnLocationChanged(lastKnown);
-                }
+                var req = BuildFusedRequest(_currentUpdateInterval);
+                _fusedClient.RequestLocationUpdates(
+                    req, _fusedCallback, Android.OS.Looper.MainLooper);
+
+                System.Diagnostics.Debug.WriteLine(
+                    "[BackgroundLocationService] FusedLocationProvider started.");
             }
             catch (Exception ex)
             {
-                UpdateNotification("GPS Error", ex.Message);
+                UpdateNotification("GPS Error (Fused)", ex.Message);
             }
         }
 
+        private void StopFusedUpdates()
+        {
+            try
+            {
+                if (_fusedClient != null && _fusedCallback != null)
+                    _fusedClient.RemoveLocationUpdates(_fusedCallback);
+            }
+            catch { }
+            finally
+            {
+                _fusedClient = null;
+                _fusedCallback = null;
+            }
+        }
+
+        private static LocationRequest BuildFusedRequest(int intervalMs)
+        {
+            var req = new LocationRequest();
+            req.SetPriority(LocationRequest.PriorityBalancedPowerAccuracy);
+            req.SetInterval(intervalMs);
+            req.SetFastestInterval(intervalMs / 2);
+            req.SetSmallestDisplacement(SIGNIFICANT_MOVEMENT_METERS);
+            return req;
+        }
+
+        // ── Raw GPS / ILocationListener (maximum accuracy) ────────────────────
+
+        private void StartRawGpsUpdates()
+        {
+            if (CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation)
+                != Android.Content.PM.Permission.Granted) return;
+
+            try
+            {
+                _locationManager = GetSystemService(LocationService) as LocationManager;
+
+                _locationManager?.RequestLocationUpdates(
+                    LocationManager.GpsProvider,
+                    _currentUpdateInterval,
+                    SIGNIFICANT_MOVEMENT_METERS,
+                    this);                          // ← this class implements ILocationListener
+
+                // Seed with last known fix so the first Telegram update is not empty
+                var lastKnown = _locationManager
+                    ?.GetLastKnownLocation(LocationManager.GpsProvider);
+                if (lastKnown != null)
+                {
+                    _lastSignificantLocation = lastKnown;
+                    HandleLocationUpdate(lastKnown);
+                }
+
+                System.Diagnostics.Debug.WriteLine(
+                    "[BackgroundLocationService] Raw GPS started.");
+            }
+            catch (Exception ex)
+            {
+                UpdateNotification("GPS Error (Raw)", ex.Message);
+            }
+        }
+
+        private void StopRawGpsUpdates()
+        {
+            try { _locationManager?.RemoveUpdates(this); }
+            catch { }
+            finally { _locationManager = null; }
+        }
+
+        // ── ILocationListener (raw GPS callbacks) ─────────────────────────────
+
+        /// <summary>Called by Android when a raw GPS fix is available.</summary>
         public void OnLocationChanged(AndroidLocation location)
+            => HandleLocationUpdate(location);
+
+        /// <summary>Called when the GPS provider is disabled (raw mode only).</summary>
+        public void OnProviderDisabled(string provider)
+        {
+            if (provider != LocationManager.GpsProvider) return;
+
+            _currentLocation = "Unknown";
+            UpdateNotification("Finder — GPS Disabled", "Tap to enable location.");
+
+            _ = Task.Run(async () =>
+            {
+                await SendMessageToTelegramAsync(
+                    "⚠️ *GPS Disabled*\n" +
+                    "Location tracking is paused — GPS was turned off on the device.\n" +
+                    "Send /enablelocation to request GPS activation.");
+            });
+
+            ShowGpsDisabledNotification();
+        }
+
+        /// <summary>Called when the GPS provider is re-enabled (raw mode only).</summary>
+        public void OnProviderEnabled(string provider)
+        {
+            if (provider != LocationManager.GpsProvider) return;
+
+            UpdateNotification("Finder is active", "GPS re-enabled — resuming tracking.");
+
+            _ = Task.Run(async () =>
+            {
+                await SendMessageToTelegramAsync(
+                    "✅ *GPS Enabled*\n" +
+                    "Location tracking has resumed automatically.");
+            });
+
+            StartRawGpsUpdates();
+        }
+
+        public void OnStatusChanged(string provider, Availability status, Bundle extras) { }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Shared location update handler (called by BOTH providers)
+        // ═════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Processes a location fix from either FusedLocationProvider or raw GPS.
+        /// Buffers the point for GeoJSON, adapts the polling interval, and
+        /// updates internal state — identical logic regardless of provider.
+        /// </summary>
+        public void HandleLocationUpdate(AndroidLocation location)
         {
             if (location == null) return;
 
@@ -289,13 +507,14 @@ namespace Finder.Droid.Services
                     System.Globalization.CultureInfo.InvariantCulture);
                 _currentLocation = $"{lat},{lon}";
 
-                // Always record to GeoJSON regardless of the sending-paused flag
+                // Buffer the point — FlushBuffer() writes to disk every 5 points
                 _ = Task.Run(() =>
                 {
                     try { _geoJsonManager.AddLocationPoint(location, "automatic"); }
                     catch { }
                 });
 
+                // Adaptive interval: faster when moving, slower when stationary
                 if (_lastSignificantLocation != null)
                 {
                     float dist = location.DistanceTo(_lastSignificantLocation);
@@ -321,134 +540,109 @@ namespace Finder.Droid.Services
         }
 
         /// <summary>
-        /// Fires automatically when the user disables GPS while the service is running.
-        /// Sends a Telegram alert and fires a heads-up notification on the device.
+        /// Called by FusedLocationCallback when location becomes unavailable.
+        /// Equivalent to OnProviderDisabled for fused mode.
         /// </summary>
-        public void OnProviderDisabled(string provider)
+        public void HandleLocationUnavailable()
         {
-            if (provider != LocationManager.GpsProvider) return;
-
             _currentLocation = "Unknown";
-            UpdateNotification("Finder — GPS Disabled", "Tap to enable location.");
+            UpdateNotification("Finder — Location Unavailable", "Check GPS settings.");
 
             _ = Task.Run(async () =>
             {
                 await SendMessageToTelegramAsync(
-                    "⚠️ *GPS Disabled*\n" +
-                    "Location tracking is paused — GPS was turned off on the device.\n" +
+                    "⚠️ *Location Unavailable*\n" +
+                    "Could not get a fix — GPS may be disabled.\n" +
                     "Send /enablelocation to request GPS activation.");
             });
 
             ShowGpsDisabledNotification();
         }
 
-        /// <summary>
-        /// Fires automatically when GPS is re-enabled on the device.
-        /// Sends a Telegram confirmation and resumes location updates.
-        /// </summary>
-        public void OnProviderEnabled(string provider)
+        // ═════════════════════════════════════════════════════════════════════
+        // Interval / pause public methods (called from BroadcastReceiver)
+        // ═════════════════════════════════════════════════════════════════════
+
+        public void UpdateInterval(int newIntervalMs)
         {
-            if (provider != LocationManager.GpsProvider) return;
-
-            UpdateNotification("Finder is active", "GPS re-enabled — resuming tracking.");
-
-            _ = Task.Run(async () =>
+            try
             {
-                await SendMessageToTelegramAsync(
-                    "✅ *GPS Enabled*\n" +
-                    "Location tracking has resumed automatically.");
-            });
-
-            StartLocationUpdates();
+                _interval = newIntervalMs.ToString();
+                var settings = LoadSettingsFromFile();
+                if (settings != null)
+                {
+                    settings.Interval = _interval;
+                    SaveSettingsToFile(settings);
+                }
+                InitializeTelegramTimer();
+                UpdateNotification("Finder is active",
+                    $"Send interval updated to {newIntervalMs} ms");
+            }
+            catch { }
         }
 
-        public void OnStatusChanged(string provider, Availability status, Bundle extras) { }
+        /// <summary>
+        /// Pauses or resumes periodic Telegram location sends.
+        /// Called by IntervalUpdateReceiver when SET_TELEGRAM_PAUSED broadcast arrives.
+        /// </summary>
+        public void SetTelegramSendingPaused(bool paused)
+        {
+            _isTelegramSendingPaused = paused;
 
-        // ── GPS helpers ───────────────────────────────────────────────────────
+            var editor = PreferenceManager.GetDefaultSharedPreferences(this).Edit();
+            editor.PutBoolean(PREF_KEY_SENDING_PAUSED, paused);
+            editor.Apply();
+
+            if (paused)
+                UpdateNotification("Finder is active — sends paused",
+                    "GPS recording continues · Telegram sends are paused");
+            else
+                UpdateNotification("Finder is active", "Telegram location sends resumed");
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // GPS status helper
+        // ═════════════════════════════════════════════════════════════════════
 
         private bool IsGpsEnabled()
         {
             try
             {
-                return _locationManager != null &&
-                       _locationManager.IsProviderEnabled(LocationManager.GpsProvider);
+                var lm = (LocationManager)GetSystemService(LocationService);
+                return lm?.IsProviderEnabled(LocationManager.GpsProvider) == true;
             }
             catch { return false; }
         }
 
-        /// <summary>
-        /// Fires a high-importance heads-up notification on the device.
-        /// Tapping it opens Android Location Settings directly.
-        /// </summary>
-        private void ShowGpsDisabledNotification()
+        // ═════════════════════════════════════════════════════════════════════
+        // WakeLock
+        // ═════════════════════════════════════════════════════════════════════
+
+        private void AcquireWakeLock()
         {
-            try
+            if (_wakeLock == null)
             {
-                var settingsIntent = new Intent(
-                    Android.Provider.Settings.ActionLocationSourceSettings);
-                settingsIntent.SetFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
-
-                var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
-                    ? PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable
-                    : PendingIntentFlags.UpdateCurrent;
-
-                var pendingIntent = PendingIntent.GetActivity(
-                    this, GPS_ALERT_NOTIFICATION_ID, settingsIntent, pendingFlags);
-
-                var notification = new NotificationCompat.Builder(this, GPS_ALERT_CHANNEL_ID)
-                    .SetContentTitle("📍 GPS Disabled — Finder")
-                    .SetContentText("Tracking paused. Tap to open Location Settings.")
-                    .SetStyle(new NotificationCompat.BigTextStyle()
-                        .BigText("Finder detected that GPS was turned off.\n" +
-                                 "Tap this notification to open Location Settings " +
-                                 "and re-enable GPS with one tap."))
-                    .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
-                    .SetContentIntent(pendingIntent)
-                    .SetAutoCancel(true)
-                    .SetPriority(NotificationCompat.PriorityHigh)
-                    .Build();
-
-                NotificationManagerCompat
-                    .From(this)
-                    .Notify(GPS_ALERT_NOTIFICATION_ID, notification);
+                var pm = (PowerManager)GetSystemService(PowerService);
+                _wakeLock = pm.NewWakeLock(WakeLockFlags.Partial, "Finder::LocationWakeLock");
             }
-            catch { }
+            if (!_wakeLock.IsHeld && _isProcessingLocation)
+                _wakeLock.Acquire(3000); // 3 s is ample for string format + buffer add
         }
 
-        /// <summary>
-        /// Creates the high-importance notification channel used for GPS alerts.
-        /// Idempotent — safe to call multiple times.
-        /// </summary>
-        private void CreateGpsAlertNotificationChannel()
+        private void ReleaseWakeLock()
         {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
-
-            try
-            {
-                var channel = new NotificationChannel(
-                    GPS_ALERT_CHANNEL_ID,
-                    "Finder GPS Alerts",
-                    NotificationImportance.High)
-                {
-                    Description = "Alerts when GPS is disabled while Finder is tracking."
-                };
-
-                channel.EnableVibration(true);
-
-                ((NotificationManager)GetSystemService(NotificationService))
-                    ?.CreateNotificationChannel(channel);
-            }
-            catch { }
+            if (_wakeLock?.IsHeld == true && !_isProcessingLocation)
+                _wakeLock.Release();
         }
 
-        // ── Telegram timer ────────────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // Telegram timer
+        // ═════════════════════════════════════════════════════════════════════
 
         private void InitializeTelegramTimer()
         {
             StopTimer(ref _telegramTimer);
-
-            int intervalMs = int.TryParse(_interval, out int iv) ? iv : 60000;
-
+            int intervalMs = int.TryParse(_interval, out int iv) ? iv : 60_000;
             _telegramTimer = new Timer(intervalMs);
             _telegramTimer.Elapsed += async (s, e) => await OnTelegramTimerElapsed();
             _telegramTimer.AutoReset = true;
@@ -466,17 +660,12 @@ namespace Finder.Droid.Services
                 if (!string.IsNullOrEmpty(_telegramBotToken) &&
                     !string.IsNullOrEmpty(_chatId))
                 {
-                    // ── PAUSE GUARD ───────────────────────────────────────────
-                    // When the user has sent /pauselocation we skip sending to
-                    // Telegram but still update the notification bar so the
-                    // service appears healthy. GPS recording continues as normal.
                     if (_isTelegramSendingPaused)
                     {
                         UpdateNotification("Finder is active — sends paused",
                             $"Paused · {DateTime.Now:HH:mm:ss} · {_currentLocation}");
                         return;
                     }
-                    // ─────────────────────────────────────────────────────────
 
                     bool inMovingMode = _currentUpdateInterval == MOVING_UPDATE_INTERVAL_MS;
 
@@ -486,12 +675,10 @@ namespace Finder.Droid.Services
                         if (parts.Length == 2 &&
                             double.TryParse(parts[0],
                                 System.Globalization.NumberStyles.Float,
-                                System.Globalization.CultureInfo.InvariantCulture,
-                                out double lat) &&
+                                System.Globalization.CultureInfo.InvariantCulture, out _) &&
                             double.TryParse(parts[1],
                                 System.Globalization.NumberStyles.Float,
-                                System.Globalization.CultureInfo.InvariantCulture,
-                                out double lon))
+                                System.Globalization.CultureInfo.InvariantCulture, out _))
                         {
                             if (inMovingMode || _updateCounter % 3 == 0)
                                 await SendLocationToTelegramAsync();
@@ -521,56 +708,13 @@ namespace Finder.Droid.Services
             }
         }
 
-        public void UpdateInterval(int newIntervalMs)
-        {
-            try
-            {
-                _interval = newIntervalMs.ToString();
-
-                var settings = LoadSettingsFromFile();
-                if (settings != null)
-                {
-                    settings.Interval = _interval;
-                    SaveSettingsToFile(settings);
-                }
-
-                InitializeTelegramTimer();
-                UpdateNotification("Finder is active",
-                    $"Interval updated to {newIntervalMs} ms");
-            }
-            catch { }
-        }
-
-        /// <summary>
-        /// Pauses or resumes periodic Telegram location sends without stopping the service.
-        /// Called by IntervalUpdateReceiver when a SET_TELEGRAM_PAUSED broadcast arrives.
-        /// The state is persisted to SharedPreferences so it survives service restarts.
-        /// </summary>
-        public void SetTelegramSendingPaused(bool paused)
-        {
-            _isTelegramSendingPaused = paused;
-
-            // Persist so the flag survives a service restart or reboot
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
-            var editor = prefs.Edit();
-            editor.PutBoolean(PREF_KEY_SENDING_PAUSED, paused);
-            editor.Apply();
-
-            // Update the persistent notification so the user can see the state
-            if (paused)
-                UpdateNotification("Finder is active — sends paused",
-                    "GPS recording continues · Telegram sends are paused");
-            else
-                UpdateNotification("Finder is active",
-                    "Telegram location sends resumed");
-        }
-
-        // ── Daily GeoJSON report ──────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // Daily GeoJSON report
+        // ═════════════════════════════════════════════════════════════════════
 
         private void SetupDailyGeoJsonTimer()
         {
             var timeUntilMidnight = DateTime.Now.Date.AddDays(1) - DateTime.Now;
-
             _dailyGeoJsonTimer = new Timer(timeUntilMidnight.TotalMilliseconds);
             _dailyGeoJsonTimer.Elapsed += DailyGeoJsonTimer_Elapsed;
             _dailyGeoJsonTimer.AutoReset = false;
@@ -595,22 +739,19 @@ namespace Finder.Droid.Services
                             Path.GetTempPath(),
                             $"finder_daily_{yesterday:yyyy-MM-dd}.geojson");
                         File.WriteAllText(tempFile, geoJson);
-
                         await SendFileToTelegramAsync(tempFile,
                             $"📊 Daily report · {yesterday:yyyy-MM-dd}", settings);
-
                         if (File.Exists(tempFile)) File.Delete(tempFile);
                     }
                 }
             }
             catch { }
-            finally
-            {
-                SetupDailyGeoJsonTimer();
-            }
+            finally { SetupDailyGeoJsonTimer(); }
         }
 
-        // ── Telegram API helpers ──────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // Telegram API helpers
+        // ═════════════════════════════════════════════════════════════════════
 
         private async Task SendLocationToTelegramAsync()
         {
@@ -623,7 +764,6 @@ namespace Finder.Droid.Services
             if (!double.TryParse(parts[1],
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out double lon)) return;
-
             try
             {
                 await _httpClient.GetAsync(
@@ -641,10 +781,11 @@ namespace Finder.Droid.Services
                 string.IsNullOrEmpty(_chatId)) return;
             try
             {
-                await _httpClient.GetAsync(
-                    $"https://api.telegram.org/bot{_telegramBotToken}" +
-                    $"/sendMessage?chat_id={_chatId}" +
-                    $"&text={Uri.EscapeDataString(message)}&parse_mode=Markdown");
+                string url = $"https://api.telegram.org/bot{_telegramBotToken}/sendMessage" +
+                             $"?chat_id={_chatId}" +
+                             $"&text={Uri.EscapeDataString(message)}" +
+                             $"&parse_mode=Markdown";
+                await _httpClient.GetStringAsync(url);
             }
             catch { }
         }
@@ -652,45 +793,35 @@ namespace Finder.Droid.Services
         private async Task SendFileToTelegramAsync(
             string filePath, string caption, AppSettings settings)
         {
-            if (!File.Exists(filePath)) return;
             try
             {
-                using (var form = new MultipartFormDataContent())
-                {
-                    var bytes = File.ReadAllBytes(filePath);
-                    var content = new ByteArrayContent(bytes);
-                    content.Headers.ContentType =
-                        new System.Net.Http.Headers.MediaTypeHeaderValue("application/geo+json");
-                    form.Add(content, "document", Path.GetFileName(filePath));
-                    form.Add(new StringContent(settings.ChatId), "chat_id");
-                    form.Add(new StringContent(caption), "caption");
+                using var content = new MultipartFormDataContent();
+                using var fileStream = File.OpenRead(filePath);
+                using var fileContent = new System.Net.Http.StreamContent(fileStream);
+                fileContent.Headers.ContentType =
+                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                content.Add(fileContent, "document", Path.GetFileName(filePath));
 
-                    await _httpClient.PostAsync(
-                        $"https://api.telegram.org/bot{settings.BotToken}/sendDocument", form);
-                }
+                string url =
+                    $"https://api.telegram.org/bot{settings.BotToken}" +
+                    $"/sendDocument?chat_id={settings.ChatId}" +
+                    $"&caption={Uri.EscapeDataString(caption)}";
+                await _httpClient.PostAsync(url, content);
             }
             catch { }
         }
 
-        // ── Settings ──────────────────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // Settings helpers
+        // ═════════════════════════════════════════════════════════════════════
 
         private void LoadSettings()
         {
-            try
-            {
-                var settings = LoadSettingsFromFile();
-                if (settings != null &&
-                    !string.IsNullOrEmpty(settings.BotToken) &&
-                    !string.IsNullOrEmpty(settings.ChatId))
-                {
-                    _telegramBotToken = settings.BotToken;
-                    _chatId = settings.ChatId;
-                    _interval = string.IsNullOrEmpty(settings.Interval)
-                                        ? "60000"
-                                        : settings.Interval;
-                }
-            }
-            catch { }
+            var s = LoadSettingsFromFile();
+            if (s == null) return;
+            _telegramBotToken = s.BotToken;
+            _chatId = s.ChatId;
+            _interval = s.Interval;
         }
 
         private AppSettings LoadSettingsFromFile()
@@ -699,10 +830,11 @@ namespace Finder.Droid.Services
             {
                 if (File.Exists(_settingsFilePath))
                     return JsonConvert.DeserializeObject<AppSettings>(
-                        File.ReadAllText(_settingsFilePath));
+                               File.ReadAllText(_settingsFilePath))
+                           ?? new AppSettings();
             }
             catch { }
-            return null;
+            return new AppSettings();
         }
 
         private void SaveSettingsToFile(AppSettings settings)
@@ -711,7 +843,9 @@ namespace Finder.Droid.Services
             catch { }
         }
 
-        // ── Notification helpers ──────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════════════════════
+        // Notification helpers
+        // ═════════════════════════════════════════════════════════════════════
 
         private void CreateNotificationChannel()
         {
@@ -719,12 +853,23 @@ namespace Finder.Droid.Services
             try
             {
                 var channel = new NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID,
-                    "Finder Location Service",
-                    NotificationImportance.Low)
-                {
-                    Description = "Shows while Finder is tracking your location."
-                };
+                    NOTIFICATION_CHANNEL_ID, "Finder Location", NotificationImportance.Low)
+                { Description = "Persistent tracking notification" };
+                ((NotificationManager)GetSystemService(NotificationService))
+                    ?.CreateNotificationChannel(channel);
+            }
+            catch { }
+        }
+
+        private void CreateGpsAlertNotificationChannel()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
+            try
+            {
+                var channel = new NotificationChannel(
+                    GPS_ALERT_CHANNEL_ID, "GPS Alerts", NotificationImportance.High)
+                { Description = "Alerts for GPS state changes" };
+                channel.EnableVibration(true);
                 ((NotificationManager)GetSystemService(NotificationService))
                     ?.CreateNotificationChannel(channel);
             }
@@ -752,47 +897,38 @@ namespace Finder.Droid.Services
             catch { }
         }
 
-        // ── WakeLock ──────────────────────────────────────────────────────────
-
-        private void AcquireWakeLock()
-        {
-            if (_wakeLock == null)
-            {
-                var pm = (PowerManager)GetSystemService(PowerService);
-                _wakeLock = pm.NewWakeLock(WakeLockFlags.Partial, "Finder::LocationWakeLock");
-            }
-            if (!_wakeLock.IsHeld && _isProcessingLocation)
-                _wakeLock.Acquire(30000);
-        }
-
-        private void ReleaseWakeLock()
-        {
-            if (_wakeLock?.IsHeld == true && !_isProcessingLocation)
-                _wakeLock.Release();
-        }
-
-        // ── Misc helpers ──────────────────────────────────────────────────────
-
-        private void SetRunningPreference(bool running)
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
-            var editor = prefs.Edit();
-            editor.PutBoolean(PREF_KEY_RUNNING, running);
-            editor.Apply();
-        }
-
-        private void RestartLocationUpdates()
+        private void ShowGpsDisabledNotification()
         {
             try
             {
-                _locationManager?.RemoveUpdates(this);
-                _locationManager?.RequestLocationUpdates(
-                    LocationManager.GpsProvider,
-                    _currentUpdateInterval,
-                    SIGNIFICANT_MOVEMENT_METERS,
-                    this);
+                var intent = new Intent(Android.Provider.Settings.ActionLocationSourceSettings);
+                intent.AddFlags(ActivityFlags.NewTask);
+                var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
+                    ? PendingIntentFlags.Immutable
+                    : (PendingIntentFlags)0;
+                var pendingIntent = PendingIntent.GetActivity(this, 0, intent, pendingFlags);
+                var builder = new NotificationCompat.Builder(this, GPS_ALERT_CHANNEL_ID)
+                    .SetContentTitle("Location Unavailable")
+                    .SetContentText("Tap to check location settings")
+                    .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
+                    .SetPriority(NotificationCompat.PriorityHigh)
+                    .SetAutoCancel(true)
+                    .SetContentIntent(pendingIntent);
+                ((NotificationManager)GetSystemService(NotificationService))
+                    ?.Notify(GPS_ALERT_NOTIFICATION_ID, builder.Build());
             }
             catch { }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Misc helpers
+        // ═════════════════════════════════════════════════════════════════════
+
+        private void SetRunningPreference(bool running)
+        {
+            var editor = PreferenceManager.GetDefaultSharedPreferences(this).Edit();
+            editor.PutBoolean(PREF_KEY_RUNNING, running);
+            editor.Apply();
         }
 
         private static void StopTimer(ref Timer timer)
@@ -804,23 +940,45 @@ namespace Finder.Droid.Services
         }
     }
 
-    // ── Broadcast receiver ────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════════
+    // FusedLocationCallback
+    // Receives fixes from FusedLocationProviderClient when in "fused" mode.
+    // ═════════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Handles dynamic runtime commands sent to the running service via LocalBroadcast.
-    ///
-    /// Actions handled:
-    ///   com.finder.UPDATE_INTERVAL     → updates the Telegram send interval
-    ///   com.finder.SET_TELEGRAM_PAUSED → pauses or resumes Telegram location sends
-    /// </summary>
+    internal class FusedLocationCallback : LocationCallback
+    {
+        private readonly BackgroundLocationService _service;
+
+        public FusedLocationCallback(BackgroundLocationService service)
+            => _service = service;
+
+        public override void OnLocationResult(LocationResult result)
+        {
+            base.OnLocationResult(result);
+            var location = result?.LastLocation;
+            if (location != null)
+                _service.HandleLocationUpdate(location);
+        }
+
+        public override void OnLocationAvailability(LocationAvailability availability)
+        {
+            base.OnLocationAvailability(availability);
+            if (availability != null && !availability.IsLocationAvailable)
+                _service.HandleLocationUnavailable();
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // IntervalUpdateReceiver
+    // Handles all runtime broadcast commands sent to the running service.
+    // ═════════════════════════════════════════════════════════════════════════
+
     public class IntervalUpdateReceiver : BroadcastReceiver
     {
         private readonly BackgroundLocationService _service;
 
         public IntervalUpdateReceiver(BackgroundLocationService service)
-        {
-            _service = service;
-        }
+            => _service = service;
 
         public override void OnReceive(Context context, Intent intent)
         {
@@ -828,16 +986,20 @@ namespace Finder.Droid.Services
 
             switch (intent.Action)
             {
-                // Existing: update the periodic send interval
                 case BackgroundLocationService.ACTION_UPDATE_INTERVAL:
-                    int newInterval = intent.GetIntExtra("new_interval", 60000);
+                    int newInterval = intent.GetIntExtra("new_interval", 60_000);
                     _service.UpdateInterval(newInterval);
                     break;
 
-                // NEW: pause or resume periodic Telegram location sends
                 case BackgroundLocationService.ACTION_SET_SENDING_PAUSED:
                     bool paused = intent.GetBooleanExtra("paused", false);
                     _service.SetTelegramSendingPaused(paused);
+                    break;
+
+                // NEW: live GPS provider switch
+                case BackgroundLocationService.ACTION_SET_GPS_PROVIDER:
+                    string provider = intent.GetStringExtra("provider") ?? "fused";
+                    _service.SetGpsProvider(provider);
                     break;
             }
         }

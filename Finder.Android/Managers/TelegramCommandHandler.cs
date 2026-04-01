@@ -29,12 +29,18 @@ namespace Finder.Droid.Managers
         private const int STARTUP_COOLDOWN_S = 60;
         private const int RESTART_COOLDOWN_S = 120;
 
+        // ── Poll-interval defaults & limits ───────────────────────────────────
+        private const int DEFAULT_POLL_INTERVAL_MS = 60_000; // 60 s default
+        private const int MIN_POLL_INTERVAL_MS = 10_000; // 10 s minimum
+
+        // ── SharedPreferences keys ────────────────────────────────────────────
+        private const string LAST_UPDATE_ID_KEY = "telegram_last_update_id";
+        private const string PREF_POLL_INTERVAL_MS = "telegram_poll_interval_ms";
+        private const string PREF_POLLING_ENABLED = "telegram_polling_enabled";
+
         // ── Notification channel ──────────────────────────────────────────────
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
-
-        // ── SharedPreferences key ─────────────────────────────────────────────
-        private const string LAST_UPDATE_ID_KEY = "telegram_last_update_id";
 
         // ── Instance fields ───────────────────────────────────────────────────
         private readonly string _settingsFilePath;
@@ -47,6 +53,7 @@ namespace Finder.Droid.Managers
         // ─────────────────────────────────────────────────────────────────────
         // Constructor
         // ─────────────────────────────────────────────────────────────────────
+
         public TelegramCommandHandler(Context context)
         {
             _context = context;
@@ -57,7 +64,6 @@ namespace Finder.Droid.Managers
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             _geoJsonManager = new GeoJsonManager(context);
 
-            // Restore last processed update ID so we never re-process old commands
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
             _lastUpdateId = prefs.GetLong(LAST_UPDATE_ID_KEY, 0);
 
@@ -76,17 +82,27 @@ namespace Finder.Droid.Managers
                 if (string.IsNullOrEmpty(settings.BotToken) ||
                     string.IsNullOrEmpty(settings.ChatId)) return;
 
-                // Poll Telegram every 10 seconds for new commands
-                _pollTimer = new Timer(PollForCommands, null, 0, 10000);
+                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                bool pollingEnabled = prefs.GetBoolean(PREF_POLLING_ENABLED, true);
+
+                if (!pollingEnabled)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        "[TelegramCommandHandler] Polling disabled — skipping timer.");
+                    return;
+                }
+
+                int pollIntervalMs = prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS);
+                if (pollIntervalMs < MIN_POLL_INTERVAL_MS)
+                    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
+
+                RestartPollTimer(pollIntervalMs);
 
                 if (sendStartupMessage)
                 {
-                    var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
                     bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
-
                     if (suppress)
                     {
-                        // Clear the flag — message was suppressed once, now reset
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", false);
                         editor.Apply();
@@ -114,6 +130,76 @@ namespace Finder.Droid.Managers
         }
 
         // ─────────────────────────────────────────────────────────────────────
+        // Poll-timer helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        private void RestartPollTimer(int intervalMs)
+        {
+            _pollTimer?.Dispose();
+            _pollTimer = new Timer(PollForCommands, null, 0, intervalMs);
+
+            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            editor.PutInt(PREF_POLL_INTERVAL_MS, intervalMs);
+            editor.Apply();
+        }
+
+        private int GetSavedPollIntervalMs()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS);
+        }
+
+        private bool IsPollingEnabled()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return prefs.GetBoolean(PREF_POLLING_ENABLED, true);
+        }
+
+        private void SetPollingEnabled(bool enabled)
+        {
+            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            editor.PutBoolean(PREF_POLLING_ENABLED, enabled);
+            editor.Apply();
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // GPS provider helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Reads the currently active GPS provider from SharedPreferences.
+        /// Returns "fused" (default) or "raw".
+        /// </summary>
+        private string GetActiveGpsProvider()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return prefs.GetString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, "fused")
+                   ?? "fused";
+        }
+
+        /// <summary>
+        /// Sends a broadcast to BackgroundLocationService to switch the GPS provider.
+        /// Also persists the new value directly so it survives if the service is
+        /// temporarily not running.
+        /// </summary>
+        private void BroadcastGpsProvider(string provider)
+        {
+            // Persist immediately (covers the case where the service is not running)
+            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            editor.PutString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, provider);
+            editor.Apply();
+
+            // Broadcast to the live service if running
+            try
+            {
+                var intent = new Intent(BackgroundLocationService.ACTION_SET_GPS_PROVIDER);
+                intent.PutExtra("provider", provider);
+                _context.SendBroadcast(intent);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
         // Polling loop
         // ─────────────────────────────────────────────────────────────────────
 
@@ -126,7 +212,7 @@ namespace Finder.Droid.Managers
                     string.IsNullOrEmpty(settings.ChatId)) return;
 
                 string url = $"https://api.telegram.org/bot{settings.BotToken}" +
-                             $"/getUpdates?offset={_lastUpdateId + 1}&timeout=5";
+                              $"/getUpdates?offset={_lastUpdateId + 1}&timeout=5";
                 string json = await _httpClient.GetStringAsync(url);
                 var resp = JsonConvert.DeserializeObject<TelegramUpdateResponse>(json);
 
@@ -137,7 +223,6 @@ namespace Finder.Droid.Managers
                     if (update.UpdateId > _lastUpdateId)
                         _lastUpdateId = update.UpdateId;
 
-                    // Only process messages from the configured chat
                     if (update.Message?.Chat?.Id.ToString() != settings.ChatId) continue;
 
                     string text = update.Message?.Text;
@@ -145,8 +230,8 @@ namespace Finder.Droid.Managers
                         await ProcessCommandAsync(text, settings);
                 }
 
-                // Persist last processed update ID
-                var prefsEditor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+                var prefsEditor = PreferenceManager
+                    .GetDefaultSharedPreferences(_context).Edit();
                 prefsEditor.PutLong(LAST_UPDATE_ID_KEY, _lastUpdateId);
                 prefsEditor.Apply();
             }
@@ -165,11 +250,49 @@ namespace Finder.Droid.Managers
                 string cmd = parts[0].ToLower().Trim();
                 string param = parts.Length > 1 ? parts[1].Trim() : null;
 
-                // response == null means the handler already sent its own message(s)
                 string response;
 
                 switch (cmd)
                 {
+                    // ── /gpsprovider fused|raw ────────────────────────────────
+                    // Switches the GPS provider live without restarting the service.
+                    // Default is "fused" (battery-efficient).
+                    // "raw" uses the hardware GPS chip directly (max accuracy).
+                    case "/gpsprovider":
+                        switch (param?.ToLower())
+                        {
+                            case "fused":
+                                BroadcastGpsProvider("fused");
+                                response = "🔋 *GPS provider → Fused (default)*\n\n" +
+                                           "Uses GPS + WiFi + cell towers.\n" +
+                                           "The OS manages chip power — battery-efficient.\n\n" +
+                                           "✅ Switch applied immediately.";
+                                break;
+
+                            case "raw":
+                                BroadcastGpsProvider("raw");
+                                response = "🛰 *GPS provider → Raw GPS*\n\n" +
+                                           "Uses the hardware GPS chip directly.\n" +
+                                           "Higher accuracy but *higher battery drain*.\n\n" +
+                                           "✅ Switch applied immediately.\n" +
+                                           "💡 Send /gpsprovider fused to revert.";
+                                break;
+
+                            default:
+                                string current = GetActiveGpsProvider();
+                                string currentLabel = current == "raw"
+                                    ? "🛰 Raw GPS (max accuracy)"
+                                    : "🔋 Fused (battery saver, default)";
+                                response = $"📡 *GPS Provider*\n\n" +
+                                           $"Current: {currentLabel}\n\n" +
+                                           $"Usage:\n" +
+                                           $"/gpsprovider fused — battery-efficient (default)\n" +
+                                           $"/gpsprovider raw   — hardware GPS chip (max accuracy)\n\n" +
+                                           $"The setting is saved and survives service restarts.";
+                                break;
+                        }
+                        break;
+
                     // ── /interval ────────────────────────────────────────────
                     case "/interval":
                         if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
@@ -189,11 +312,73 @@ namespace Finder.Droid.Managers
                             bIntent.PutExtra("new_interval", ivMs);
                             _context.SendBroadcast(bIntent);
 
-                            response = $"⏱ Interval set to {ivMs} ms";
+                            response = $"⏱ Location send interval set to {ivMs} ms";
                         }
                         else
                         {
                             response = "❌ Usage: /interval [milliseconds] (min 5000)";
+                        }
+                        break;
+
+                    // ── /polling on|off ───────────────────────────────────────
+                    case "/polling":
+                        switch (param?.ToLower())
+                        {
+                            case "off":
+                                SetPollingEnabled(false);
+                                Stop();
+                                response = "⏸ *Telegram polling disabled*\n\n" +
+                                           "No more command polls — zero network calls.\n" +
+                                           "⚠️ Re-enable from the app or restart tracking.";
+                                break;
+                            case "on":
+                                SetPollingEnabled(true);
+                                int ci = GetSavedPollIntervalMs();
+                                RestartPollTimer(ci);
+                                response = $"▶️ *Telegram polling enabled*\n\n" +
+                                           $"Polling every {ci / 1000}s.\n" +
+                                           $"Use /pollinterval [sec] to change.";
+                                break;
+                            default:
+                                bool en = IsPollingEnabled();
+                                response = $"📡 Polling is *{(en ? "ON ✅" : "OFF ⏸")}*\n\n" +
+                                           "/polling on  — enable\n" +
+                                           "/polling off — disable (saves battery)";
+                                break;
+                        }
+                        break;
+
+                    // ── /pollinterval [seconds] ───────────────────────────────
+                    case "/pollinterval":
+                        if (!string.IsNullOrEmpty(param) &&
+                            int.TryParse(param, out int pollSec) && pollSec >= 10)
+                        {
+                            int pollMs = pollSec * 1000;
+                            if (!IsPollingEnabled())
+                            {
+                                var ed = PreferenceManager
+                                    .GetDefaultSharedPreferences(_context).Edit();
+                                ed.PutInt(PREF_POLL_INTERVAL_MS, pollMs);
+                                ed.Apply();
+                                response = $"💾 Poll interval saved as {pollSec}s.\n" +
+                                           "⚠️ Polling is OFF — applies on /polling on.";
+                            }
+                            else
+                            {
+                                RestartPollTimer(pollMs);
+                                response = $"🔄 Poll interval → *{pollSec}s*\n\n" +
+                                           "💡 60s = balanced · 120s = saver · 10s = fastest";
+                            }
+                        }
+                        else
+                        {
+                            int cur = GetSavedPollIntervalMs() / 1000;
+                            response = $"❌ Usage: /pollinterval [sec] (min 10)\n" +
+                                       $"Current: *{cur}s*\n\n" +
+                                       "Examples:\n" +
+                                       "/pollinterval 10  — every 10s\n" +
+                                       "/pollinterval 60  — every 1 min (default)\n" +
+                                       "/pollinterval 120 — every 2 min";
                         }
                         break;
 
@@ -202,23 +387,32 @@ namespace Finder.Droid.Managers
                         var statusFiles = _geoJsonManager.GetAvailableDataFiles();
                         bool sendsPaused = IsTelegramSendingPaused();
                         bool autoStart = Xamarin.Essentials.Preferences.Get(
-                                               Finder.ViewModels.MainViewModel.PREF_AUTO_START,
-                                               false);
+                                                  Finder.ViewModels.MainViewModel.PREF_AUTO_START,
+                                                  false);
+                        bool pollEnabled = IsPollingEnabled();
+                        int pollIntervalSec = GetSavedPollIntervalMs() / 1000;
+                        string activeProvider = GetActiveGpsProvider();
+                        string providerLabel = activeProvider == "raw"
+                            ? "🛰 Raw GPS (max accuracy)"
+                            : "🔋 Fused (battery saver)";
 
                         response = $"📍 *Status*\n" +
-                                   $"Tracking: {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
-                                   $"Telegram sends: {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
-                                   $"Auto-start on open: {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
-                                   $"Token: {MaskToken(currentSettings.BotToken)}\n" +
-                                   $"Chat ID: {currentSettings.ChatId}\n" +
-                                   $"Interval: {currentSettings.Interval} ms\n" +
-                                   $"Data files: {statusFiles.Count}\n" +
-                                   $"Device time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                                   $"Tracking:        {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
+                                   $"GPS provider:    {providerLabel}\n" +
+                                   $"Telegram sends:  {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
+                                   $"Command polling: {(pollEnabled ? $"✅ Every {pollIntervalSec}s" : "⏸ Disabled")}\n" +
+                                   $"Auto-start:      {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
+                                   $"Token:           {MaskToken(currentSettings.BotToken)}\n" +
+                                   $"Chat ID:         {currentSettings.ChatId}\n" +
+                                   $"Send interval:   {currentSettings.Interval} ms\n" +
+                                   $"Data files:      {statusFiles.Count}\n" +
+                                   $"Device time:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
 
-                        if (sendsPaused)
-                            response += "\n\n💡 Send /resumelocation to turn sends back on.";
-                        if (!autoStart)
-                            response += "\n💡 Send /autostart on to enable auto-start.";
+                        if (sendsPaused) response += "\n\n💡 /resumelocation to resume sends.";
+                        if (!pollEnabled) response += "\n💡 /polling on to re-enable polling.";
+                        if (!autoStart) response += "\n💡 /autostart on to enable auto-start.";
+                        if (activeProvider == "raw")
+                            response += "\n⚡ Raw GPS is active — higher battery drain.";
                         break;
 
                     // ── /start ───────────────────────────────────────────────
@@ -239,7 +433,7 @@ namespace Finder.Droid.Managers
                         {
                             int remaining = RESTART_COOLDOWN_S -
                                 (int)(DateTime.Now - _lastRestartCommand).TotalSeconds;
-                            response = $"⏳ Please wait {remaining}s before restarting again.";
+                            response = $"⏳ Wait {remaining}s before restarting.";
                             break;
                         }
                         _lastRestartCommand = DateTime.Now;
@@ -263,10 +457,7 @@ namespace Finder.Droid.Managers
                             SaveSettings(currentSettings);
                             response = $"🔑 Token updated: {MaskToken(param)}";
                         }
-                        else
-                        {
-                            response = "❌ Usage: /token [your_bot_token]";
-                        }
+                        else { response = "❌ Usage: /token [your_bot_token]"; }
                         break;
 
                     // ── /chatid ──────────────────────────────────────────────
@@ -277,64 +468,51 @@ namespace Finder.Droid.Managers
                             SaveSettings(currentSettings);
                             response = $"💬 Chat ID updated: {param}";
                         }
-                        else
-                        {
-                            response = "❌ Usage: /chatid [your_chat_id]";
-                        }
+                        else { response = "❌ Usage: /chatid [your_chat_id]"; }
                         break;
 
                     // ── /today ───────────────────────────────────────────────
                     case "/today":
-                        await SendGeoJsonReport(DateTime.Today, currentSettings);
+                        await HandleGeoJsonReportAsync(currentSettings, DateTime.Today);
                         response = null;
                         break;
 
                     // ── /yesterday ───────────────────────────────────────────
                     case "/yesterday":
-                        await SendGeoJsonReport(DateTime.Today.AddDays(-1), currentSettings);
+                        await HandleGeoJsonReportAsync(currentSettings,
+                            DateTime.Today.AddDays(-1));
                         response = null;
                         break;
 
-                    // ── /report YYYY-MM-DD ───────────────────────────────────
+                    // ── /report ──────────────────────────────────────────────
                     case "/report":
                         if (!string.IsNullOrEmpty(param) &&
                             DateTime.TryParseExact(param, "yyyy-MM-dd",
-                                null,
-                                System.Globalization.DateTimeStyles.None,
-                                out DateTime reportDate))
+                                CultureInfo.InvariantCulture,
+                                DateTimeStyles.None, out DateTime reportDate))
                         {
-                            await SendGeoJsonReport(reportDate, currentSettings);
+                            await HandleGeoJsonReportAsync(currentSettings, reportDate);
                             response = null;
                         }
-                        else
-                        {
-                            response = "❌ Usage: /report YYYY-MM-DD";
-                        }
+                        else { response = "❌ Usage: /report YYYY-MM-DD"; }
                         break;
 
                     // ── /files ───────────────────────────────────────────────
                     case "/files":
-                        var dataFiles = _geoJsonManager.GetAvailableDataFiles();
-                        if (dataFiles.Count == 0)
-                        {
-                            response = "📂 No data files found.";
-                        }
-                        else
-                        {
-                            response = $"📂 *Data files ({dataFiles.Count}):*\n" +
-                                       string.Join("\n", dataFiles.Take(20));
-                            if (dataFiles.Count > 20)
-                                response += $"\n…and {dataFiles.Count - 20} more";
-                        }
+                        var files = _geoJsonManager.GetAvailableDataFiles();
+                        response = files.Count == 0
+                            ? "📂 No data files found."
+                            : "📂 *Available data files:*\n" +
+                              string.Join("\n", files.Select(f => $"• {Path.GetFileName(f)}"));
                         break;
 
-                    // ── /cleanup [days] ──────────────────────────────────────
+                    // ── /cleanup ─────────────────────────────────────────────
                     case "/cleanup":
-                        int keepDays = int.TryParse(param, out int d) && d > 0 ? d : 30;
+                        int keepDays = int.TryParse(param, out int kd) ? kd : 30;
                         int before = _geoJsonManager.GetAvailableDataFiles().Count;
                         await _geoJsonManager.CleanupOldFiles(keepDays);
                         int after = _geoJsonManager.GetAvailableDataFiles().Count;
-                        response = $"🧹 Cleanup done · Removed {before - after} files older than {keepDays} days";
+                        response = $"🧹 Removed {before - after} files older than {keepDays} days.";
                         break;
 
                     // ── /gpsstatus ───────────────────────────────────────────
@@ -342,149 +520,119 @@ namespace Finder.Droid.Managers
                         bool gpsOn = IsGpsEnabled();
                         bool svcActive = IsServiceRunning();
                         int battery = GetBatteryLevel();
+                        string gpsProv = GetActiveGpsProvider();
 
                         response = "📡 *GPS Status*\n" +
-                                   $"GPS Provider: {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
-                                   $"Tracking Service: {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
-                                   $"Battery: {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
-                                   $"Time: {DateTime.Now:HH:mm:ss}";
-
+                                   $"GPS chip:     {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
+                                   $"Provider:     {(gpsProv == "raw" ? "🛰 Raw GPS" : "🔋 Fused")}\n" +
+                                   $"Service:      {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
+                                   $"Battery:      {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
+                                   $"Time:         {DateTime.Now:HH:mm:ss}";
                         if (!gpsOn)
-                            response += "\n\n💡 Send /enablelocation to request GPS activation.";
+                            response += "\n\n💡 /enablelocation to request GPS activation.";
                         break;
 
                     // ── /enablelocation ──────────────────────────────────────
                     case "/enablelocation":
                         if (IsGpsEnabled())
                         {
-                            response = "✅ GPS is already enabled on this device.";
+                            response = "✅ GPS is already enabled.";
                         }
                         else
                         {
                             ShowEnableLocationNotification();
                             response = "📲 *Action required on the device*\n\n" +
-                                       "A notification has been sent to the phone.\n" +
-                                       "Tap it to open Location Settings and enable GPS.\n\n" +
-                                       "⚠️ Android does not allow apps to silently enable GPS — " +
-                                       "one tap by the user is required.";
+                                       "A notification has been sent.\n" +
+                                       "Tap it to open Location Settings.";
                         }
                         break;
 
                     // ── /location ────────────────────────────────────────────
-                    // Fetches the current device GPS position and sends back
-                    // a native Telegram map card + a text with coordinates.
                     case "/location":
                         await HandleLocationCommandAsync(currentSettings);
-                        response = null; // handler sends its own messages
+                        response = null;
                         break;
 
-                    // ── /autostart on|off ─────────────────────────────────────
-                    // Enables or disables the behaviour where opening the app
-                    // automatically starts the tracking service if it is not
-                    // already running. The service itself is never stopped by
-                    // this command — only the on-open auto-start behaviour changes.
-                    case "/autostart":
-                        if (param == "on" || param == "enable" ||
-                            param == "yes" || param == "1" || param == "true")
-                        {
-                            Xamarin.Essentials.Preferences.Set(
-                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
-
-                            response = "✅ *Auto-start enabled*\n\n" +
-                                       "The tracking service will start automatically\n" +
-                                       "every time the app is opened by the user.\n\n" +
-                                       "• Service keeps running as normal\n" +
-                                       "• Takes effect the next time the app is opened\n\n" +
-                                       "Send /autostart off to disable.";
-                        }
-                        else if (param == "off" || param == "disable" ||
-                                 param == "no" || param == "0" || param == "false")
-                        {
-                            Xamarin.Essentials.Preferences.Set(
-                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
-
-                            response = "⏹ *Auto-start disabled*\n\n" +
-                                       "The app will no longer start the tracking\n" +
-                                       "service automatically when opened.\n\n" +
-                                       "• The currently running service is unaffected\n" +
-                                       "• User must press Start manually in the app\n\n" +
-                                       "Send /autostart on to re-enable.";
-                        }
-                        else
-                        {
-                            // No param → report current state
-                            bool current = Xamarin.Essentials.Preferences.Get(
-                                Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
-
-                            response = $"⚙ *Auto-start on open*\n\n" +
-                                       $"Current state: {(current ? "✅ Enabled" : "❌ Disabled")}\n\n" +
-                                       $"Usage:\n" +
-                                       $"/autostart on  — Enable auto-start\n" +
-                                       $"/autostart off — Disable auto-start";
-                        }
-                        break;
-
-                    // ── /pauselocation ────────────────────────────────────────
-                    // Stops periodic Telegram location sends.
-                    // The service, GPS recording and GeoJSON logging keep running.
+                    // ── /pauselocation ───────────────────────────────────────
                     case "/pauselocation":
                         if (IsTelegramSendingPaused())
                         {
-                            response = "⏸ Location sends are *already paused*.\n" +
-                                       "Send /resumelocation to turn them back on.";
+                            response = "⏸ Already paused.";
                         }
                         else
                         {
                             BroadcastSendingPaused(true);
-                            response = "⏸ *Periodic location sends paused*\n\n" +
-                                       "✅ Service is still running\n" +
-                                       "✅ GPS recording continues\n" +
-                                       "✅ GeoJSON history still logged\n" +
-                                       "❌ No more automatic Telegram updates\n\n" +
-                                       "Send /resumelocation to turn sends back on.\n" +
-                                       "Send /location any time to get a manual fix.";
+                            response = "⏸ *Location sends paused*\n\n" +
+                                       "GPS + GeoJSON still running.\n" +
+                                       "Send /resumelocation to turn back on.";
                         }
                         break;
 
-                    // ── /resumelocation ───────────────────────────────────────
-                    // Resumes periodic Telegram location sends after a pause.
+                    // ── /resumelocation ──────────────────────────────────────
                     case "/resumelocation":
                         if (!IsTelegramSendingPaused())
                         {
-                            response = "▶️ Location sends are *already active*.\n" +
-                                       "Send /pauselocation to pause them.";
+                            response = "▶️ Already active.";
                         }
                         else
                         {
                             BroadcastSendingPaused(false);
-                            response = "▶️ *Periodic location sends resumed*\n\n" +
-                                       "Telegram will now receive location updates " +
-                                       "at the configured interval.";
+                            response = "▶️ *Location sends resumed*";
+                        }
+                        break;
+
+                    // ── /autostart on|off ─────────────────────────────────────
+                    case "/autostart":
+                        switch (param?.ToLower())
+                        {
+                            case "on":
+                                Xamarin.Essentials.Preferences.Set(
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
+                                response = "✅ Auto-start enabled.";
+                                break;
+                            case "off":
+                                Xamarin.Essentials.Preferences.Set(
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
+                                response = "❌ Auto-start disabled.";
+                                break;
+                            default:
+                                response = "❌ Usage: /autostart on|off";
+                                break;
                         }
                         break;
 
                     // ── /cmd (help) ──────────────────────────────────────────
                     case "/cmd":
                     default:
-                        response = "📋 *Available commands:*\n" +
-                                   "/interval [ms] — Set update interval\n" +
-                                   "/status — Current status\n" +
+                        response = "📋 *Available commands:*\n\n" +
+                                   "📍 *Tracking*\n" +
                                    "/start — Start tracking\n" +
                                    "/stop — Stop tracking\n" +
                                    "/restart — Restart service\n" +
-                                   "/token [token] — Change bot token\n" +
-                                   "/chatid [id] — Change chat ID\n" +
-                                   "/today — Today's GeoJSON report\n" +
-                                   "/yesterday — Yesterday's report\n" +
-                                   "/report YYYY-MM-DD — Specific date report\n" +
-                                   "/files — List data files\n" +
-                                   "/cleanup [days] — Delete old files\n" +
-                                   "/gpsstatus — Check if GPS is on or off\n" +
-                                   "/enablelocation — Send notification to enable GPS\n" +
+                                   "/status — Full status report\n" +
                                    "/location — Get current location now\n" +
-                                   "/pauselocation — Pause automatic Telegram sends\n" +
-                                   "/resumelocation — Resume automatic Telegram sends\n" +
-                                   "/autostart on|off — Auto-start service when app opens";
+                                   "/autostart on|off — Auto-start on app open\n\n" +
+                                   "🛰 *GPS Provider*\n" +
+                                   "/gpsprovider fused — Battery-efficient (default)\n" +
+                                   "/gpsprovider raw   — Hardware GPS (max accuracy)\n" +
+                                   "/gpsstatus         — GPS chip + provider info\n" +
+                                   "/enablelocation    — Request GPS activation\n\n" +
+                                   "📡 *Polling*\n" +
+                                   "/polling on|off       — Enable/disable command polling\n" +
+                                   "/pollinterval [sec]   — Set poll frequency (min 10s)\n\n" +
+                                   "📤 *Location sends*\n" +
+                                   "/interval [ms]    — Set send interval (min 5000)\n" +
+                                   "/pauselocation    — Pause Telegram sends\n" +
+                                   "/resumelocation   — Resume Telegram sends\n\n" +
+                                   "📂 *Data*\n" +
+                                   "/today            — Today's GeoJSON\n" +
+                                   "/yesterday        — Yesterday's GeoJSON\n" +
+                                   "/report YYYY-MM-DD — Specific date\n" +
+                                   "/files            — List data files\n" +
+                                   "/cleanup [days]   — Delete old files\n\n" +
+                                   "⚙️ *Config*\n" +
+                                   "/token [token]    — Change bot token\n" +
+                                   "/chatid [id]      — Change chat ID";
                         break;
                 }
 
@@ -496,352 +644,241 @@ namespace Finder.Droid.Managers
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // /location — handler
+        // /location handler
         // ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Handles the /location command end-to-end:
-        ///   1. Sends an instant "fetching…" acknowledgement.
-        ///   2. Tries the last known GPS fix first (fast, zero battery cost).
-        ///   3. Falls back to a fresh Geolocation request (10 s timeout).
-        ///   4. Sends a native Telegram map card (interactive map in chat).
-        ///   5. Sends a text message with coordinates, accuracy, and a
-        ///      Google Maps deep-link.
-        /// </summary>
+        // ─────────────────────────────────────────────────────────────────────
+        // /location handler
+        // Always uses raw GPS regardless of the active provider setting.
+        // Reason: /location is an on-demand fix — the user wants the most
+        // accurate position possible right now, not a cached or fused estimate.
+        // ─────────────────────────────────────────────────────────────────────
+
         private async Task HandleLocationCommandAsync(AppSettings settings)
         {
+            await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                "📡 Fetching current location via raw GPS…");
+
             try
             {
-                // ── Step 1: instant acknowledgement ──────────────────────────
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    "📡 Fetching current location…");
+                Android.Locations.Location rawLocation = null;
 
-                // ── Step 2: try to get coordinates ───────────────────────────
-                double? lat = null, lon = null;
-                float? accuracy = null;
-                string source = "unknown";
-
-                // 2a. Last known fix from Android LocationManager (instant)
+                // ── Step 1: try the last known raw GPS fix (zero battery cost) ────
                 try
                 {
-                    var lm = (LocationManager)_context
+                    var locationManager = (LocationManager)_context
                         .GetSystemService(Context.LocationService);
 
-                    Android.Locations.Location fix = null;
-
-                    // GPS provider first — most accurate
-                    if (lm != null &&
-                        lm.IsProviderEnabled(LocationManager.GpsProvider))
+                    if (locationManager != null &&
+                        locationManager.IsProviderEnabled(LocationManager.GpsProvider))
                     {
-                        fix = lm.GetLastKnownLocation(LocationManager.GpsProvider);
-                        if (fix != null) source = "GPS (cached)";
-                    }
-
-                    // Network provider as fallback
-                    if (fix == null && lm != null &&
-                        lm.IsProviderEnabled(LocationManager.NetworkProvider))
-                    {
-                        fix = lm.GetLastKnownLocation(LocationManager.NetworkProvider);
-                        if (fix != null) source = "Network (cached)";
-                    }
-
-                    if (fix != null)
-                    {
-                        lat = fix.Latitude;
-                        lon = fix.Longitude;
-                        accuracy = fix.Accuracy;  // metres
+                        rawLocation = locationManager
+                            .GetLastKnownLocation(LocationManager.GpsProvider);
                     }
                 }
-                catch { /* fall through to fresh request */ }
+                catch { /* fall through to Step 2 */ }
 
-                // 2b. Fresh GPS request if no cached fix is available
-                if (lat == null || lon == null)
+                // ── Step 2: if no cached fix, request a fresh raw GPS fix ─────────
+                // Uses a one-shot SingleLocationListener with a 15-second timeout.
+                if (rawLocation == null ||
+                    (DateTime.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(
+                        rawLocation.Time).UtcDateTime).TotalSeconds > 30)
                 {
-                    try
-                    {
-                        var request = new GeolocationRequest(
-                            GeolocationAccuracy.Medium,
-                            TimeSpan.FromSeconds(10));
-
-                        var loc = await Geolocation.GetLocationAsync(request);
-                        if (loc != null)
-                        {
-                            lat = loc.Latitude;
-                            lon = loc.Longitude;
-                            accuracy = (float?)loc.Accuracy;
-                            source = "GPS (fresh fix)";
-                        }
-                    }
-                    catch { /* GPS unavailable */ }
+                    rawLocation = await GetFreshRawGpsFixAsync(timeoutSeconds: 15);
                 }
 
-                // ── Step 3: handle failure ────────────────────────────────────
-                if (lat == null || lon == null)
+                // ── Step 3: if raw GPS failed entirely, fall back to Essentials ───
+                // This can happen when GPS is disabled or has no satellite view.
+                if (rawLocation == null)
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Location unavailable*\n\n" +
-                        "Could not obtain the device's position.\n" +
-                        "• Make sure GPS is enabled on the device.\n" +
-                        "• Try /gpsstatus to check GPS state.\n" +
-                        "• Try /enablelocation to turn GPS on remotely.");
+                        "⚠️ Raw GPS timed out — falling back to last known location…");
+
+                    var fallback = await Xamarin.Essentials.Geolocation
+                        .GetLastKnownLocationAsync();
+
+                    if (fallback == null)
+                    {
+                        await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                            "❌ Could not get location.\n" +
+                            "Make sure GPS is enabled and you have a clear sky view.");
+                        return;
+                    }
+
+                    string fbLat = fallback.Latitude.ToString(CultureInfo.InvariantCulture);
+                    string fbLon = fallback.Longitude.ToString(CultureInfo.InvariantCulture);
+                    string fbMaps = $"https://www.google.com/maps?q={fbLat},{fbLon}";
+
+                    await _httpClient.GetStringAsync(
+                        $"https://api.telegram.org/bot{settings.BotToken}" +
+                        $"/sendLocation?chat_id={settings.ChatId}" +
+                        $"&latitude={fbLat}&longitude={fbLon}");
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"📍 *Last Known Location* _(fallback — not raw GPS)_\n" +
+                        $"Lat: `{fbLat}`\nLon: `{fbLon}`\n" +
+                        $"Accuracy: {fallback.Accuracy:F0} m\n" +
+                        $"[Open in Google Maps]({fbMaps})");
                     return;
                 }
 
-                // ── Step 4: send native Telegram map card ─────────────────────
-                // This renders as an interactive map preview directly in the chat.
-                await SendTelegramLocationAsync(
-                    settings.BotToken, settings.ChatId,
-                    lat.Value, lon.Value);
+                // ── Step 4: send the raw GPS fix to Telegram ──────────────────────
+                string lat = rawLocation.Latitude.ToString(CultureInfo.InvariantCulture);
+                string lon = rawLocation.Longitude.ToString(CultureInfo.InvariantCulture);
+                string maps = $"https://www.google.com/maps?q={lat},{lon}";
+                string age = GetFixAgeDescription(rawLocation.Time);
 
-                // ── Step 5: send coordinates text + Google Maps link ──────────
-                string latStr = lat.Value.ToString("F6", CultureInfo.InvariantCulture);
-                string lonStr = lon.Value.ToString("F6", CultureInfo.InvariantCulture);
-                string mapsUrl = $"https://www.google.com/maps?q={latStr},{lonStr}";
-                string accText = accuracy.HasValue ? $"±{accuracy.Value:F0} m" : "Unknown";
+                // Send native Telegram map card
+                await _httpClient.GetStringAsync(
+                    $"https://api.telegram.org/bot{settings.BotToken}" +
+                    $"/sendLocation?chat_id={settings.ChatId}" +
+                    $"&latitude={lat}&longitude={lon}");
 
-                string msg = $"📍 *Current Location*\n\n" +
-                             $"🌐 Latitude:  `{latStr}`\n" +
-                             $"🌐 Longitude: `{lonStr}`\n" +
-                             $"🎯 Accuracy:  {accText}\n" +
-                             $"📡 Source:    {source}\n" +
-                             $"🕐 Time:      {DateTime.Now:HH:mm:ss}\n\n" +
-                             $"[📌 Open in Google Maps]({mapsUrl})";
+                // Send details text
+                string accuracy = rawLocation.HasAccuracy
+                    ? $"{rawLocation.Accuracy:F0} m"
+                    : "unknown";
 
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId, msg);
+                string speed = rawLocation.HasSpeed
+                    ? $"{rawLocation.Speed * 3.6:F1} km/h"
+                    : "—";
+
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"📍 *Current Location* _(raw GPS)_\n" +
+                    $"Lat:      `{lat}`\n" +
+                    $"Lon:      `{lon}`\n" +
+                    $"Accuracy: {accuracy}\n" +
+                    $"Speed:    {speed}\n" +
+                    $"Fix age:  {age}\n" +
+                    $"[Open in Google Maps]({maps})");
             }
-            catch { /* Silent fail — never crash the poll loop */ }
+            catch (Exception ex)
+            {
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"❌ Location error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Requests a single fresh raw GPS fix using a TaskCompletionSource-backed
+        /// ILocationListener. Waits up to <paramref name="timeoutSeconds"/> seconds.
+        /// Returns null if no fix arrives before the timeout.
+        /// </summary>
+        private Task<Android.Locations.Location> GetFreshRawGpsFixAsync(int timeoutSeconds)
+        {
+            var tcs = new TaskCompletionSource<Android.Locations.Location>();
+
+            try
+            {
+                var locationManager = (LocationManager)_context
+                    .GetSystemService(Context.LocationService);
+
+                if (locationManager == null ||
+                    !locationManager.IsProviderEnabled(LocationManager.GpsProvider))
+                {
+                    tcs.TrySetResult(null);
+                    return tcs.Task;
+                }
+
+                // Inline one-shot listener — removes itself after the first fix
+                var listener = new SingleShotLocationListener(fix =>
+                {
+                    tcs.TrySetResult(fix);
+                });
+
+                // Request a single update — min time 0, min distance 0
+                locationManager.RequestLocationUpdates(
+                    LocationManager.GpsProvider,
+                    minTime: 0,
+                    minDistance: 0f,
+                    listener,
+                    Android.OS.Looper.MainLooper);
+
+                // Timeout guard — removes listener if no fix arrives in time
+                Task.Delay(timeoutSeconds * 1000).ContinueWith(_ =>
+                {
+                    try { locationManager.RemoveUpdates(listener); }
+                    catch { }
+                    tcs.TrySetResult(null);
+                });
+            }
+            catch
+            {
+                tcs.TrySetResult(null);
+            }
+
+            return tcs.Task;
+        }
+
+        /// <summary>
+        /// Returns a human-readable description of how old a GPS fix is.
+        /// </summary>
+        private static string GetFixAgeDescription(long fixTimeMs)
+        {
+            try
+            {
+                var fixTime = DateTimeOffset.FromUnixTimeMilliseconds(fixTimeMs).UtcDateTime;
+                var age = DateTime.UtcNow - fixTime;
+
+                if (age.TotalSeconds < 5) return "just now";
+                if (age.TotalSeconds < 60) return $"{(int)age.TotalSeconds}s ago";
+                if (age.TotalMinutes < 60) return $"{(int)age.TotalMinutes} min ago";
+                return $"{(int)age.TotalHours}h ago";
+            }
+            catch { return "unknown"; }
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Telegram API helpers
+        // GeoJSON report handler
         // ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Sends a native Telegram location message that renders as an
-        /// interactive map card inside the Telegram chat.
-        /// Uses the /sendLocation Bot API endpoint.
-        /// </summary>
-        private async Task SendTelegramLocationAsync(
-            string token, string chatId, double latitude, double longitude)
-        {
-            if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(chatId)) return;
-            try
-            {
-                string latStr = latitude.ToString("F6", CultureInfo.InvariantCulture);
-                string lonStr = longitude.ToString("F6", CultureInfo.InvariantCulture);
-
-                string url = $"https://api.telegram.org/bot{token}" +
-                             $"/sendLocation" +
-                             $"?chat_id={Uri.EscapeDataString(chatId)}" +
-                             $"&latitude={latStr}" +
-                             $"&longitude={lonStr}";
-
-                await _httpClient.GetAsync(url);
-            }
-            catch { }
-        }
-
-        /// <summary>
-        /// Sends a plain text (Markdown) message to the configured Telegram chat.
-        /// </summary>
-        private async Task SendTelegramMessageAsync(
-            string token, string chatId, string message)
-        {
-            if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(chatId)) return;
-            try
-            {
-                string url = $"https://api.telegram.org/bot{token}" +
-                             $"/sendMessage" +
-                             $"?chat_id={Uri.EscapeDataString(chatId)}" +
-                             $"&text={Uri.EscapeDataString(message)}" +
-                             $"&parse_mode=Markdown";
-                await _httpClient.GetStringAsync(url);
-            }
-            catch { }
-        }
-
-        /// <summary>
-        /// Sends a GeoJSON report file for the given date as a Telegram document.
-        /// </summary>
-        private async Task SendGeoJsonReport(DateTime date, AppSettings settings)
+        private async Task HandleGeoJsonReportAsync(AppSettings settings, DateTime date)
         {
             try
             {
-                string geoJson = await _geoJsonManager.GenerateGeoJsonForDate(date);
-
-                if (string.IsNullOrEmpty(geoJson))
+                string filePath = _geoJsonManager.GetFilePathForDate(date);
+                if (!File.Exists(filePath))
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"📭 No data found for {date:yyyy-MM-dd}");
+                        $"📂 No data for {date:yyyy-MM-dd}.");
                     return;
                 }
 
-                string tempPath = Path.Combine(
-                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal),
-                    $"report_{date:yyyy-MM-dd}.geojson");
+                using var content = new MultipartFormDataContent();
+                using var fileStream = File.OpenRead(filePath);
+                using var fileContent = new System.Net.Http.StreamContent(fileStream);
+                fileContent.Headers.ContentType =
+                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                content.Add(fileContent, "document", Path.GetFileName(filePath));
 
-                File.WriteAllText(tempPath, geoJson);
-
-                using (var form = new MultipartFormDataContent())
-                {
-                    var bytes = File.ReadAllBytes(tempPath);
-                    var content = new ByteArrayContent(bytes);
-                    content.Headers.ContentType =
-                        new System.Net.Http.Headers.MediaTypeHeaderValue("application/geo+json");
-                    form.Add(content, "document", Path.GetFileName(tempPath));
-                    form.Add(new StringContent(settings.ChatId), "chat_id");
-                    form.Add(new StringContent($"📍 Location report for {date:yyyy-MM-dd}"), "caption");
-
-                    await _httpClient.PostAsync(
-                        $"https://api.telegram.org/bot{settings.BotToken}/sendDocument", form);
-                }
+                string url =
+                    $"https://api.telegram.org/bot{settings.BotToken}" +
+                    $"/sendDocument?chat_id={settings.ChatId}" +
+                    $"&caption=📍 GeoJSON report for {date:yyyy-MM-dd}";
+                await _httpClient.PostAsync(url, content);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"❌ Report error: {ex.Message}");
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Device helpers
+        // Service control helpers
         // ─────────────────────────────────────────────────────────────────────
-
-        private bool IsGpsEnabled()
-        {
-            try
-            {
-                var lm = (LocationManager)_context.GetSystemService(Context.LocationService);
-                return lm != null && lm.IsProviderEnabled(LocationManager.GpsProvider);
-            }
-            catch { return false; }
-        }
-
-        private int GetBatteryLevel()
-        {
-            try
-            {
-                var filter = new IntentFilter(Intent.ActionBatteryChanged);
-                var batteryStatus = _context.RegisterReceiver(null, filter);
-                int level = batteryStatus?.GetIntExtra(BatteryManager.ExtraLevel, -1) ?? -1;
-                int scale = batteryStatus?.GetIntExtra(BatteryManager.ExtraScale, -1) ?? -1;
-                if (level < 0 || scale <= 0) return -1;
-                return (int)((level / (float)scale) * 100);
-            }
-            catch { return -1; }
-        }
-
-        private void ShowEnableLocationNotification()
-        {
-            try
-            {
-                var settingsIntent = new Intent(
-                    Android.Provider.Settings.ActionLocationSourceSettings);
-                settingsIntent.SetFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
-
-                var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
-                    ? PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable
-                    : PendingIntentFlags.UpdateCurrent;
-
-                var pendingIntent = PendingIntent.GetActivity(
-                    _context, GPS_ALERT_NOTIFICATION_ID, settingsIntent, pendingFlags);
-
-                var notification = new NotificationCompat.Builder(_context, GPS_ALERT_CHANNEL_ID)
-                    .SetContentTitle("📍 Enable GPS — Finder")
-                    .SetContentText("Tap here to open Location Settings and turn on GPS.")
-                    .SetStyle(new NotificationCompat.BigTextStyle()
-                        .BigText("Finder needs GPS to track your location.\n" +
-                                 "Tap this notification to open Location Settings " +
-                                 "and enable GPS with one tap."))
-                    .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
-                    .SetContentIntent(pendingIntent)
-                    .SetAutoCancel(true)
-                    .SetPriority(NotificationCompat.PriorityHigh)
-                    .Build();
-
-                NotificationManagerCompat
-                    .From(_context)
-                    .Notify(GPS_ALERT_NOTIFICATION_ID, notification);
-            }
-            catch { }
-        }
-
-        private void CreateGpsAlertNotificationChannel()
-        {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
-            try
-            {
-                var channel = new NotificationChannel(
-                    GPS_ALERT_CHANNEL_ID,
-                    "Finder GPS Alerts",
-                    NotificationImportance.High)
-                {
-                    Description = "Alerts sent when GPS needs to be enabled remotely."
-                };
-                channel.EnableVibration(true);
-
-                ((NotificationManager)_context.GetSystemService(Context.NotificationService))
-                    ?.CreateNotificationChannel(channel);
-            }
-            catch { }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Service helpers
-        // ─────────────────────────────────────────────────────────────────────
-
-        private bool IsServiceRunning()
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetBoolean("is_tracking_service_running", false);
-        }
-
-        /// <summary>
-        /// Reads the persisted paused flag written by BackgroundLocationService.
-        /// Works whether the service is running or stopped.
-        /// </summary>
-        private bool IsTelegramSendingPaused()
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetBoolean("is_telegram_sending_paused", false);
-        }
-
-        /// <summary>
-        /// Sends a broadcast to the running BackgroundLocationService telling it
-        /// to pause (paused=true) or resume (paused=false) Telegram location sends.
-        /// Also updates the SharedPreferences key directly so the state is correct
-        /// even if the service is temporarily stopped and gets restarted later.
-        /// </summary>
-        private void BroadcastSendingPaused(bool paused)
-        {
-            // Persist immediately — covers the case where the service is not running
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            var editor = prefs.Edit();
-            editor.PutBoolean("is_telegram_sending_paused", paused);
-            editor.Apply();
-
-            // Also broadcast to the live service if it is currently running
-            try
-            {
-                var intent = new Intent(BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
-                intent.PutExtra("paused", paused);
-                _context.SendBroadcast(intent);
-            }
-            catch { /* service may not be running — SharedPreferences is the fallback */ }
-        }
 
         private void StartService()
         {
             try
             {
                 AppCommandHandler.Stop();
-
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
+                intent.PutExtra("explicit_user_start", true);
                 if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
                     _context.StartForegroundService(intent);
                 else
                     _context.StartService(intent);
-
-                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                var editor = prefs.Edit();
-                editor.PutBoolean("is_tracking_service_running", true);
-                editor.Apply();
             }
             catch { }
         }
@@ -851,21 +888,117 @@ namespace Finder.Droid.Managers
             try
             {
                 BackgroundLocationService.IsStoppingByUserRequest = true;
-
                 var intent = new Intent(_context, typeof(BackgroundLocationService));
                 _context.StopService(intent);
 
-                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                var editor = prefs.Edit();
-                editor.PutBoolean("is_tracking_service_running", false);
-                editor.Apply();
-
-                // Hand polling back to the app-level handler after service stops
                 Task.Delay(2000).ContinueWith(_ =>
                 {
                     BackgroundLocationService.IsStoppingByUserRequest = false;
                     AppCommandHandler.Start(_context, sendStartupMessage: false);
                 });
+            }
+            catch { }
+        }
+
+        private bool IsServiceRunning()
+            => BackgroundLocationService.IsRunning;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Telegram sends paused helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        private bool IsTelegramSendingPaused()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return prefs.GetBoolean(BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, false);
+        }
+
+        private void BroadcastSendingPaused(bool paused)
+        {
+            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            editor.PutBoolean(BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, paused);
+            editor.Apply();
+
+            try
+            {
+                var intent = new Intent(BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
+                intent.PutExtra("paused", paused);
+                _context.SendBroadcast(intent);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // GPS / battery helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        private bool IsGpsEnabled()
+        {
+            try
+            {
+                var lm = (LocationManager)_context
+                    .GetSystemService(Context.LocationService);
+                return lm?.IsProviderEnabled(LocationManager.GpsProvider) == true;
+            }
+            catch { return false; }
+        }
+
+        private int GetBatteryLevel()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var battery = _context.RegisterReceiver(null, filter);
+                int level = battery?.GetIntExtra(BatteryManager.ExtraLevel, -1) ?? -1;
+                int scale = battery?.GetIntExtra(BatteryManager.ExtraScale, 1) ?? 1;
+                return scale > 0 ? (int)(level * 100f / scale) : -1;
+            }
+            catch { return -1; }
+        }
+
+        private void ShowEnableLocationNotification()
+        {
+            try
+            {
+                var intent = new Intent(
+                    Android.Provider.Settings.ActionLocationSourceSettings);
+                intent.AddFlags(ActivityFlags.NewTask);
+                var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
+                    ? PendingIntentFlags.Immutable
+                    : (PendingIntentFlags)0;
+                var pendingIntent = PendingIntent.GetActivity(
+                    _context, 0, intent, pendingFlags);
+
+                var builder = new NotificationCompat.Builder(
+                        _context, GPS_ALERT_CHANNEL_ID)
+                    .SetContentTitle("Enable GPS")
+                    .SetContentText("Tap to open Location Settings")
+                    .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
+                    .SetPriority(NotificationCompat.PriorityHigh)
+                    .SetAutoCancel(true)
+                    .SetContentIntent(pendingIntent);
+
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.Notify(GPS_ALERT_NOTIFICATION_ID, builder.Build());
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Telegram messaging
+        // ─────────────────────────────────────────────────────────────────────
+
+        private async Task SendTelegramMessageAsync(
+            string botToken, string chatId, string message)
+        {
+            try
+            {
+                string url = $"https://api.telegram.org/bot{botToken}/sendMessage" +
+                             $"?chat_id={chatId}" +
+                             $"&text={Uri.EscapeDataString(message)}" +
+                             $"&parse_mode=Markdown";
+                await _httpClient.GetStringAsync(url);
             }
             catch { }
         }
@@ -879,8 +1012,11 @@ namespace Finder.Droid.Managers
             try
             {
                 if (File.Exists(_settingsFilePath))
-                    return JsonConvert.DeserializeObject<AppSettings>(
-                        File.ReadAllText(_settingsFilePath)) ?? new AppSettings();
+                {
+                    var s = JsonConvert.DeserializeObject<AppSettings>(
+                        File.ReadAllText(_settingsFilePath));
+                    if (s != null) return s;
+                }
             }
             catch { }
             return new AppSettings();
@@ -888,14 +1024,67 @@ namespace Finder.Droid.Managers
 
         private void SaveSettings(AppSettings settings)
         {
-            try { File.WriteAllText(_settingsFilePath, JsonConvert.SerializeObject(settings)); }
+            try
+            {
+                File.WriteAllText(_settingsFilePath,
+                    JsonConvert.SerializeObject(settings));
+            }
             catch { }
         }
 
-        private string MaskToken(string token)
+        private static string MaskToken(string token)
         {
-            if (string.IsNullOrEmpty(token) || token.Length < 8) return "Not set";
-            return token.Substring(0, 6) + "•••" + token.Substring(token.Length - 4);
+            if (string.IsNullOrEmpty(token) || token.Length <= 8) return "***";
+            return token[..4] + "****" + token[^4..];
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Notification channel
+        // ─────────────────────────────────────────────────────────────────────
+
+        private void CreateGpsAlertNotificationChannel()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
+            try
+            {
+                var channel = new NotificationChannel(
+                    GPS_ALERT_CHANNEL_ID, "GPS Alerts", NotificationImportance.High)
+                { Description = "Alerts for GPS state changes" };
+                channel.EnableVibration(true);
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.CreateNotificationChannel(channel);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // SingleShotLocationListener
+        // One-shot ILocationListener used only by /location command.
+        // Removes itself from LocationManager after the first fix arrives.
+        // ─────────────────────────────────────────────────────────────────────────
+
+        internal class SingleShotLocationListener : Java.Lang.Object, ILocationListener
+        {
+            private readonly Action<Android.Locations.Location> _onFix;
+            private bool _delivered = false;
+
+            public SingleShotLocationListener(Action<Android.Locations.Location> onFix)
+                => _onFix = onFix;
+
+            public void OnLocationChanged(Android.Locations.Location location)
+            {
+                // Guard against duplicate callbacks
+                if (_delivered) return;
+                _delivered = true;
+                _onFix?.Invoke(location);
+            }
+
+            public void OnProviderDisabled(string provider) { }
+            public void OnProviderEnabled(string provider) { }
+            public void OnStatusChanged(string provider,
+                Availability status, Bundle extras)
+            { }
         }
     }
 }
