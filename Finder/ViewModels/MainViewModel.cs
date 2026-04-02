@@ -17,10 +17,9 @@ namespace Finder.ViewModels
 
         // ── Status polling ─────────────────────────────────────────────────────
         // Polls the real service state every 5 seconds while the page is visible.
-        // This keeps the Start/Stop buttons in sync even when the service is
-        // started or stopped remotely via a Telegram command.
+        // Keeps Start/Stop buttons in sync when service changes via Telegram command.
         private CancellationTokenSource _pollingCts;
-        private const int STATUS_POLL_INTERVAL_MS = 5000; // 5 seconds
+        private const int STATUS_POLL_INTERVAL_MS = 5000;
 
         // ── Events ─────────────────────────────────────────────────────────────
         public event EventHandler RequestOpenSettings;
@@ -37,9 +36,12 @@ namespace Finder.ViewModels
                 async () => await ExecuteStartService(),
                 () => !IsServiceRunning && !IsBusy);
 
+            // NOTE: StopServiceCommand intentionally does NOT check IsBusy.
+            // The Stop button must remain enabled while Start is processing
+            // so the user can cancel a stuck start. IsBusy only gates Start.
             StopServiceCommand = new Command(
                 async () => await ExecuteStopService(),
-                () => IsServiceRunning && !IsBusy);
+                () => IsServiceRunning);
 
             ShareLocationCommand = new Command(
                 async () => await ExecuteShareLocation(),
@@ -70,6 +72,7 @@ namespace Finder.ViewModels
                         ? Color.FromHex("#43A047")
                         : Color.FromHex("#E53935");
 
+                    // Always notify both buttons when running state changes
                     ((Command)StartServiceCommand).ChangeCanExecute();
                     ((Command)StopServiceCommand).ChangeCanExecute();
                 }
@@ -107,10 +110,6 @@ namespace Finder.ViewModels
 
         // ── Initialization ─────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Called every time MainPage appears (OnAppearing).
-        /// Checks current service status and attempts auto-start if configured.
-        /// </summary>
         public async Task InitializeAsync()
         {
             await CheckServiceStatus();
@@ -120,19 +119,13 @@ namespace Finder.ViewModels
         // ── Status polling ─────────────────────────────────────────────────────
 
         /// <summary>
-        /// Starts a lightweight background loop that reads the real service state
-        /// every 5 seconds and updates IsServiceRunning accordingly.
-        ///
-        /// This ensures the Start/Stop buttons stay in sync when the service is
-        /// started or stopped remotely via a Telegram command (/start, /stop)
-        /// without any user interaction inside the app.
-        ///
-        /// The loop reads only a SharedPreferences boolean — no GPS, no network,
-        /// negligible battery impact. It stops immediately when the page disappears.
+        /// Starts a 5-second poll loop that reads the real service state and
+        /// updates buttons — keeps UI in sync with remote Telegram commands.
+        /// Runs only while the page is visible. Zero battery cost — reads only
+        /// a single SharedPreferences boolean.
         /// </summary>
         public void StartStatusPolling()
         {
-            // Cancel any existing poll loop before starting a new one
             StopStatusPolling();
 
             _pollingCts = new CancellationTokenSource();
@@ -145,44 +138,28 @@ namespace Finder.ViewModels
                     try
                     {
                         await Task.Delay(STATUS_POLL_INTERVAL_MS, token);
-
                         if (token.IsCancellationRequested) break;
 
-                        // Read the real service state from SharedPreferences
                         bool running = await _locationService.IsTrackingActive();
 
-                        // Only update the UI if the state has actually changed —
-                        // avoids unnecessary property-change notifications
                         if (running != IsServiceRunning)
                         {
-                            // Must update UI on the main thread
                             Device.BeginInvokeOnMainThread(() =>
                             {
                                 IsServiceRunning = running;
-
                                 LastUpdateText = running
                                     ? $"Started remotely at {DateTime.Now:HH:mm:ss}"
                                     : $"Stopped remotely at {DateTime.Now:HH:mm:ss}";
                             });
                         }
                     }
-                    catch (TaskCanceledException)
-                    {
-                        // Normal cancellation — exit the loop cleanly
-                        break;
-                    }
-                    catch
-                    {
-                        // Swallow any other error — polling must never crash the app
-                    }
+                    catch (TaskCanceledException) { break; }
+                    catch { /* never crash the app */ }
                 }
             }, token);
         }
 
-        /// <summary>
-        /// Stops the background status polling loop.
-        /// Safe to call multiple times or when already stopped.
-        /// </summary>
+        /// <summary>Stops the polling loop. Safe to call when already stopped.</summary>
         public void StopStatusPolling()
         {
             try
@@ -191,27 +168,17 @@ namespace Finder.ViewModels
                 _pollingCts?.Dispose();
             }
             catch { }
-            finally
-            {
-                _pollingCts = null;
-            }
+            finally { _pollingCts = null; }
         }
 
         // ── Auto-start ─────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Reads the auto-start flag (set remotely via /autostart on|off) and
-        /// starts the service automatically if conditions are met.
-        /// </summary>
         private async Task TryAutoStartAsync()
         {
             bool autoStart = Preferences.Get(PREF_AUTO_START, false);
-
-            if (!autoStart || IsServiceRunning || IsBusy)
-                return;
+            if (!autoStart || IsServiceRunning || IsBusy) return;
 
             LastUpdateText = "⚙ Auto-starting service…";
-
             await ExecuteStartService();
 
             if (IsServiceRunning)
@@ -220,17 +187,14 @@ namespace Finder.ViewModels
 
         // ── Status check ───────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Reads the real service state once and updates the UI immediately.
-        /// Called on page appear and by RefreshStatusCommand.
-        /// </summary>
         public async Task CheckServiceStatus()
         {
             try
             {
                 IsBusy = true;
                 ((Command)StartServiceCommand).ChangeCanExecute();
-                ((Command)StopServiceCommand).ChangeCanExecute();   // ← ADD THIS
+                ((Command)StopServiceCommand).ChangeCanExecute();
+                ((Command)ShareLocationCommand).ChangeCanExecute();
 
                 bool running = await _locationService.IsTrackingActive();
                 IsServiceRunning = running;
@@ -243,8 +207,9 @@ namespace Finder.ViewModels
             finally
             {
                 IsBusy = false;
+                // Notify ALL buttons — IsBusy changed, re-evaluate everything
                 ((Command)StartServiceCommand).ChangeCanExecute();
-                ((Command)StopServiceCommand).ChangeCanExecute();   // ← ADD THIS
+                ((Command)StopServiceCommand).ChangeCanExecute();
                 ((Command)ShareLocationCommand).ChangeCanExecute();
             }
         }
@@ -256,18 +221,19 @@ namespace Finder.ViewModels
             try
             {
                 IsBusy = true;
+                // Notify Start (now disabled) and Share
                 ((Command)StartServiceCommand).ChangeCanExecute();
                 ((Command)ShareLocationCommand).ChangeCanExecute();
+                // NOTE: do NOT notify StopServiceCommand here —
+                // its predicate no longer checks IsBusy, so it stays
+                // enabled correctly based on IsServiceRunning only.
 
                 await _locationService.StartTracking();
 
-                IsServiceRunning = true;
+                IsServiceRunning = true; // ← this notifies both Start AND Stop via the setter
                 LastUpdateText = $"Started at {DateTime.Now:HH:mm:ss}";
 
-                // Notify MainActivity to stop the app-level Telegram handler —
-                // the background service now owns polling.
                 MessagingCenter.Send<MainViewModel>(this, "ServiceStarted");
-
                 ShowSuccess?.Invoke(this, "Location tracking started successfully.");
             }
             catch (Exception ex)
@@ -277,7 +243,9 @@ namespace Finder.ViewModels
             finally
             {
                 IsBusy = false;
+                // FIX: notify ALL buttons in the finally block
                 ((Command)StartServiceCommand).ChangeCanExecute();
+                ((Command)StopServiceCommand).ChangeCanExecute();
                 ((Command)ShareLocationCommand).ChangeCanExecute();
             }
         }
@@ -288,18 +256,21 @@ namespace Finder.ViewModels
             {
                 await _locationService.StopTracking();
 
-                IsServiceRunning = false;
+                IsServiceRunning = false; // ← notifies both Start AND Stop via the setter
                 LastUpdateText = $"Stopped at {DateTime.Now:HH:mm:ss}";
 
-                // Notify MainActivity to start the app-level Telegram handler —
-                // the service is gone so the app must handle polling now.
                 MessagingCenter.Send<MainViewModel>(this, "ServiceStopped");
-
                 ShowSuccess?.Invoke(this, "Location tracking stopped.");
             }
             catch (Exception ex)
             {
                 ShowAlert?.Invoke(this, $"Failed to stop tracking: {ex.Message}");
+            }
+            finally
+            {
+                // Safety net — ensure buttons are correct even on exception
+                ((Command)StartServiceCommand).ChangeCanExecute();
+                ((Command)StopServiceCommand).ChangeCanExecute();
             }
         }
 
