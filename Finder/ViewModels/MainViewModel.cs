@@ -230,6 +230,7 @@ namespace Finder.ViewModels
             {
                 IsBusy = true;
                 ((Command)StartServiceCommand).ChangeCanExecute();
+                ((Command)StopServiceCommand).ChangeCanExecute();   // ← ADD THIS
 
                 bool running = await _locationService.IsTrackingActive();
                 IsServiceRunning = running;
@@ -243,6 +244,7 @@ namespace Finder.ViewModels
             {
                 IsBusy = false;
                 ((Command)StartServiceCommand).ChangeCanExecute();
+                ((Command)StopServiceCommand).ChangeCanExecute();   // ← ADD THIS
                 ((Command)ShareLocationCommand).ChangeCanExecute();
             }
         }
