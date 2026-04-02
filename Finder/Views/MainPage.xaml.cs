@@ -11,7 +11,8 @@ namespace Finder.Views
         public MainPage()
         {
             Resources = new ResourceDictionary();
-            Resources.Add("InverseBoolConverter", new Finder.Converters.InverseBoolConverter());
+            Resources.Add("InverseBoolConverter",
+                new Finder.Converters.InverseBoolConverter());
 
             InitializeComponent();
 
@@ -27,8 +28,31 @@ namespace Finder.Views
         protected override async void OnAppearing()
         {
             base.OnAppearing();
+
+            // 1. Immediate status check — buttons reflect reality right away
             await _viewModel.InitializeAsync();
+
+            // 2. Start the 5-second polling loop — keeps buttons in sync
+            //    with remote /start and /stop Telegram commands while
+            //    the page is visible.
+            _viewModel.StartStatusPolling();
         }
+
+        protected override void OnDisappearing()
+        {
+            base.OnDisappearing();
+
+            // Stop polling as soon as the page is not visible —
+            // no battery wasted when the user is on another screen.
+            _viewModel.StopStatusPolling();
+
+            _viewModel.RequestOpenSettings -= OnRequestOpenSettings;
+            _viewModel.RequestViewHistory -= OnRequestViewHistory;
+            _viewModel.ShowAlert -= OnShowAlert;
+            _viewModel.ShowSuccess -= OnShowSuccess;
+        }
+
+        // ── Navigation helpers ─────────────────────────────────────────────────
 
         private async void OnSettingsToolbarClicked(object sender, EventArgs e)
         {
@@ -53,16 +77,6 @@ namespace Finder.Views
         private async void OnShowSuccess(object sender, string message)
         {
             await DisplayAlert("✓ Success", message, "OK");
-        }
-
-        protected override void OnDisappearing()
-        {
-            base.OnDisappearing();
-
-            _viewModel.RequestOpenSettings -= OnRequestOpenSettings;
-            _viewModel.RequestViewHistory -= OnRequestViewHistory;
-            _viewModel.ShowAlert -= OnShowAlert;
-            _viewModel.ShowSuccess -= OnShowSuccess;
         }
     }
 }

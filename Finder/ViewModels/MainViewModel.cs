@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using Finder.Services;
@@ -10,11 +11,16 @@ namespace Finder.ViewModels
     public class MainViewModel : BaseViewModel
     {
         // ── SharedPreferences key (via Xamarin.Essentials.Preferences) ────────
-        // Written by TelegramCommandHandler (/autostart on|off).
-        // Read here on every app open to decide whether to auto-start the service.
         public const string PREF_AUTO_START = "auto_start_on_open";
 
         private readonly ILocationService _locationService;
+
+        // ── Status polling ─────────────────────────────────────────────────────
+        // Polls the real service state every 5 seconds while the page is visible.
+        // This keeps the Start/Stop buttons in sync even when the service is
+        // started or stopped remotely via a Telegram command.
+        private CancellationTokenSource _pollingCts;
+        private const int STATUS_POLL_INTERVAL_MS = 5000; // 5 seconds
 
         // ── Events ─────────────────────────────────────────────────────────────
         public event EventHandler RequestOpenSettings;
@@ -33,7 +39,7 @@ namespace Finder.ViewModels
 
             StopServiceCommand = new Command(
                 async () => await ExecuteStopService(),
-                () => IsServiceRunning);
+                () => IsServiceRunning && !IsBusy);
 
             ShareLocationCommand = new Command(
                 async () => await ExecuteShareLocation(),
@@ -92,7 +98,6 @@ namespace Finder.ViewModels
         }
 
         // ── Commands ───────────────────────────────────────────────────────────
-
         public ICommand StartServiceCommand { get; }
         public ICommand StopServiceCommand { get; }
         public ICommand ShareLocationCommand { get; }
@@ -104,13 +109,7 @@ namespace Finder.ViewModels
 
         /// <summary>
         /// Called every time MainPage appears (OnAppearing).
-        ///
-        /// Flow:
-        ///   1. Check whether the service is currently running.
-        ///   2. If the service is NOT running and auto-start is enabled,
-        ///      start the service automatically — no user tap required.
-        ///      The user is informed via the LastUpdateText label so the
-        ///      behaviour is transparent, not silent.
+        /// Checks current service status and attempts auto-start if configured.
         /// </summary>
         public async Task InitializeAsync()
         {
@@ -118,44 +117,121 @@ namespace Finder.ViewModels
             await TryAutoStartAsync();
         }
 
+        // ── Status polling ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Starts a lightweight background loop that reads the real service state
+        /// every 5 seconds and updates IsServiceRunning accordingly.
+        ///
+        /// This ensures the Start/Stop buttons stay in sync when the service is
+        /// started or stopped remotely via a Telegram command (/start, /stop)
+        /// without any user interaction inside the app.
+        ///
+        /// The loop reads only a SharedPreferences boolean — no GPS, no network,
+        /// negligible battery impact. It stops immediately when the page disappears.
+        /// </summary>
+        public void StartStatusPolling()
+        {
+            // Cancel any existing poll loop before starting a new one
+            StopStatusPolling();
+
+            _pollingCts = new CancellationTokenSource();
+            var token = _pollingCts.Token;
+
+            Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(STATUS_POLL_INTERVAL_MS, token);
+
+                        if (token.IsCancellationRequested) break;
+
+                        // Read the real service state from SharedPreferences
+                        bool running = await _locationService.IsTrackingActive();
+
+                        // Only update the UI if the state has actually changed —
+                        // avoids unnecessary property-change notifications
+                        if (running != IsServiceRunning)
+                        {
+                            // Must update UI on the main thread
+                            Device.BeginInvokeOnMainThread(() =>
+                            {
+                                IsServiceRunning = running;
+
+                                LastUpdateText = running
+                                    ? $"Started remotely at {DateTime.Now:HH:mm:ss}"
+                                    : $"Stopped remotely at {DateTime.Now:HH:mm:ss}";
+                            });
+                        }
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        // Normal cancellation — exit the loop cleanly
+                        break;
+                    }
+                    catch
+                    {
+                        // Swallow any other error — polling must never crash the app
+                    }
+                }
+            }, token);
+        }
+
+        /// <summary>
+        /// Stops the background status polling loop.
+        /// Safe to call multiple times or when already stopped.
+        /// </summary>
+        public void StopStatusPolling()
+        {
+            try
+            {
+                _pollingCts?.Cancel();
+                _pollingCts?.Dispose();
+            }
+            catch { }
+            finally
+            {
+                _pollingCts = null;
+            }
+        }
+
+        // ── Auto-start ─────────────────────────────────────────────────────────
+
         /// <summary>
         /// Reads the auto-start flag (set remotely via /autostart on|off) and
-        /// starts the service if the conditions are met.
-        ///
-        /// Conditions for auto-start:
-        ///   • auto_start_on_open == true   (set via Telegram command)
-        ///   • Service is not already running
-        ///   • App is not currently busy with another operation
+        /// starts the service automatically if conditions are met.
         /// </summary>
         private async Task TryAutoStartAsync()
         {
-            // Read the flag written by TelegramCommandHandler via the same key
             bool autoStart = Preferences.Get(PREF_AUTO_START, false);
 
             if (!autoStart || IsServiceRunning || IsBusy)
                 return;
 
-            // Inform the user transparently — auto-start is never silent
             LastUpdateText = "⚙ Auto-starting service…";
 
             await ExecuteStartService();
 
-            // If start succeeded, reflect it in the label
             if (IsServiceRunning)
                 LastUpdateText = $"Auto-started at {DateTime.Now:HH:mm:ss}";
         }
 
         // ── Status check ───────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Reads the real service state once and updates the UI immediately.
+        /// Called on page appear and by RefreshStatusCommand.
+        /// </summary>
         public async Task CheckServiceStatus()
         {
             try
             {
-                bool running = await _locationService.IsTrackingActive();
-
                 IsBusy = true;
                 ((Command)StartServiceCommand).ChangeCanExecute();
 
+                bool running = await _locationService.IsTrackingActive();
                 IsServiceRunning = running;
                 LastUpdateText = $"Last checked: {DateTime.Now:HH:mm:ss}";
             }
@@ -186,8 +262,8 @@ namespace Finder.ViewModels
                 IsServiceRunning = true;
                 LastUpdateText = $"Started at {DateTime.Now:HH:mm:ss}";
 
-                // Notify MainActivity to stop the app-level handler —
-                // the background service now owns Telegram polling.
+                // Notify MainActivity to stop the app-level Telegram handler —
+                // the background service now owns polling.
                 MessagingCenter.Send<MainViewModel>(this, "ServiceStarted");
 
                 ShowSuccess?.Invoke(this, "Location tracking started successfully.");
@@ -213,8 +289,8 @@ namespace Finder.ViewModels
                 IsServiceRunning = false;
                 LastUpdateText = $"Stopped at {DateTime.Now:HH:mm:ss}";
 
-                // Notify MainActivity to start the app-level handler —
-                // the service is gone so the app must handle Telegram polling.
+                // Notify MainActivity to start the app-level Telegram handler —
+                // the service is gone so the app must handle polling now.
                 MessagingCenter.Send<MainViewModel>(this, "ServiceStopped");
 
                 ShowSuccess?.Invoke(this, "Location tracking stopped.");
