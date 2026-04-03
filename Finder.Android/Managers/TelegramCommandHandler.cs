@@ -45,6 +45,14 @@ namespace Finder.Droid.Managers
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
 
+        // ── Auto-update command ───────────────────────────────────────────────
+        private static DateTime _lastUpdateCommand = DateTime.MinValue;
+        private const int UPDATE_COOLDOWN_S = 60;
+
+        // Notification channel used for APK download progress display
+        private const string UPDATE_CHANNEL_ID = "finder_update_channel";
+        private const int UPDATE_NOTIFICATION_ID = 3001;
+
         // ── Instance fields ───────────────────────────────────────────────────
         private readonly string _settingsFilePath;
         private readonly Context _context;
@@ -71,6 +79,9 @@ namespace Finder.Droid.Managers
             _lastUpdateId = prefs.GetLong(LAST_UPDATE_ID_KEY, 0);
 
             CreateGpsAlertNotificationChannel();
+
+            // Register the notification channel for update download progress
+            CreateUpdateNotificationChannel();
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -571,6 +582,34 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
+                    // ── /version ─────────────────────────────────────────────────────────
+                    // Reports the currently installed app version back to the admin.
+                    // Use this to confirm which version is running before sending /update.
+                    case "/version":
+                        var runningAssembly = System.Reflection.Assembly.GetExecutingAssembly();
+                        var runningVersion = runningAssembly.GetName().Version;
+                        response = $"📦 *Finder — Installed Version*\n\n" +
+                                   $"Version: `{runningVersion.Major}.{runningVersion.Minor}.{runningVersion.Build}`\n\n" +
+                                   $"To push an update:\n" +
+                                   $"`/update [version] [url]`\n\n" +
+                                   $"Example:\n" +
+                                   $"`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`";
+                        break;
+
+                    // ── /update [version] [url] ──────────────────────────────────────────
+                    // Checks if the given version is newer than the installed one.
+                    // If newer: downloads the APK from [url] and triggers the installer.
+                    // Supported hosts: Google Drive, Dropbox, any direct HTTPS URL.
+                    //
+                    // Usage:
+                    //   /update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID
+                    //   /update 1.0.2 https://www.dropbox.com/s/xxx/Finder.apk?dl=1
+                    case "/update":
+                        // Delegate to the dedicated handler — it sends its own Telegram replies
+                        await HandleUpdateCommandAsync(param, currentSettings);
+                        response = null; // prevent the generic reply below from also sending
+                        break;
+
                     // ── /cmd (help) ──────────────────────────────────────────
                     case "/cmd":
                     default:
@@ -594,7 +633,10 @@ namespace Finder.Droid.Managers
                                    "/report YYYY-MM-DD\n" +
                                    "/files · /cleanup [days]\n\n" +
                                    "⚙️ *Config*\n" +
-                                   "/token [token] · /chatid [id]";
+                                   "/token [token] · /chatid [id]\n" +
+                                   "⬆️ *App Update*\n" +
+                                   "/version — show installed version\n" +
+                                   "/update [ver] [url] — push new APK\n\n";
                         break;
                 }
 
@@ -994,6 +1036,263 @@ namespace Finder.Droid.Managers
                     GPS_ALERT_CHANNEL_ID, "GPS Alerts", NotificationImportance.High)
                 { Description = "Alerts for GPS state changes" };
                 channel.EnableVibration(true);
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.CreateNotificationChannel(channel);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Auto-update handler
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Full handler for the /update [version] [url] command.
+        ///
+        /// Flow:
+        ///   1. Validate the command parameters (version string + URL).
+        ///   2. Compare the requested version against the installed AssemblyVersion.
+        ///   3. If newer: download the APK with progress notifications.
+        ///   4. On success: trigger the Android package installer.
+        ///   5. At each step: send a Telegram status reply to the admin.
+        /// </summary>
+        private async Task HandleUpdateCommandAsync(string param, AppSettings settings)
+        {
+            try
+            {
+                // ── Cooldown guard ────────────────────────────────────────────
+                // Prevent rapid repeated /update commands during a download
+                if ((DateTime.Now - _lastUpdateCommand).TotalSeconds < UPDATE_COOLDOWN_S)
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"⏳ Update cooldown active. " +
+                        $"Please wait {UPDATE_COOLDOWN_S} seconds between requests.");
+                    return;
+                }
+
+                // ── Parameter validation ──────────────────────────────────────
+                if (string.IsNullOrWhiteSpace(param))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Missing parameters.*\n\n" +
+                        "Usage: `/update [version] [url]`\n\n" +
+                        "Examples:\n" +
+                        "`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`\n" +
+                        "`/update 1.0.2 https://www.dropbox.com/s/xxx/Finder.apk?dl=1`");
+                    return;
+                }
+
+                // Split into exactly 2 parts: version + url
+                // Use StringSplitOptions.None to preserve the URL even if it has spaces
+                string[] updateParts = param.Split(new[] { ' ' }, 2,
+                    StringSplitOptions.RemoveEmptyEntries);
+
+                if (updateParts.Length < 2 ||
+                    string.IsNullOrWhiteSpace(updateParts[0]) ||
+                    string.IsNullOrWhiteSpace(updateParts[1]))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Invalid format.*\n\n" +
+                        "Usage: `/update [version] [url]`\n\n" +
+                        "Both version and URL are required.\n" +
+                        "Example: `/update 1.0.2 https://...`");
+                    return;
+                }
+
+                string requestedVersionStr = updateParts[0].Trim();
+                string apkUrl = updateParts[1].Trim();
+
+                // ── Version parsing ───────────────────────────────────────────
+                if (!Version.TryParse(requestedVersionStr, out Version requestedVersion))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"❌ *Invalid version format:* `{requestedVersionStr}`\n\n" +
+                        "Use dot-separated numbers: `1.0.2` or `1.0.2.0`");
+                    return;
+                }
+
+                // ── Version comparison ────────────────────────────────────────
+                // Read the version embedded in AssemblyInfo.cs at build time
+                var installedVersion = System.Reflection.Assembly
+                    .GetExecutingAssembly()
+                    .GetName()
+                    .Version;
+
+                // Normalize both to Major.Minor.Build for comparison
+                var installed3 = new Version(
+                    installedVersion.Major,
+                    installedVersion.Minor,
+                    installedVersion.Build);
+
+                var requested3 = new Version(
+                    requestedVersion.Major,
+                    requestedVersion.Minor,
+                    requestedVersion.Build > 0 ? requestedVersion.Build : 0);
+
+                if (requested3 <= installed3)
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"✅ *Already up to date.*\n\n" +
+                        $"Installed: `{installed3.Major}.{installed3.Minor}.{installed3.Build}`\n" +
+                        $"Requested: `{requestedVersionStr}` — not newer.\n\n" +
+                        "Send `/version` to confirm the running version.");
+                    return;
+                }
+
+                // ── All checks passed — begin update process ──────────────────
+                _lastUpdateCommand = DateTime.Now;
+
+                // Announce update to admin
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"📥 *Update queued!*\n\n" +
+                    $"Installed: `{installed3.Major}.{installed3.Minor}.{installed3.Build}`\n" +
+                    $"New:       `{requestedVersionStr}`\n\n" +
+                    "⬇️ Downloading APK now…\n" +
+                    "_You will receive another message when it is ready to install._");
+
+                // Show Android progress notification on the device
+                ShowUpdateProgressNotification("Downloading Finder update…", 0, done: false);
+
+                // ── Download ──────────────────────────────────────────────────
+                var downloader = new Finder.Droid.Services.ApkDownloaderService(_context);
+
+                string apkPath = await downloader.DownloadApkAsync(
+                    apkUrl,
+                    progress =>
+                    {
+                        // Update the progress notification every % change
+                        ShowUpdateProgressNotification(
+                            $"Downloading Finder update… {progress}%",
+                            progress,
+                            done: false);
+                    });
+
+                // ── Download failed ───────────────────────────────────────────
+                if (string.IsNullOrEmpty(apkPath))
+                {
+                    CancelUpdateNotification();
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Download failed.*\n\n" +
+                        "Possible causes:\n" +
+                        "• The URL is incorrect or expired\n" +
+                        "• Google Drive link is not set to 'Anyone with link'\n" +
+                        "• The APK is too large and Google Drive requires manual confirm\n" +
+                        "• No internet connection on the device\n\n" +
+                        "Please check the URL and try again.");
+                    return;
+                }
+
+                // ── Download complete — check install permission ──────────────
+                ShowUpdateProgressNotification(
+                    "Download complete! Tap to install.", 100, done: true);
+
+                // On API 26+: check if the user has enabled "Install unknown apps"
+                if (!Finder.Droid.Services.ApkInstaller.CanInstallPackages(_context))
+                {
+                    // Open the settings screen — the user must enable it manually
+                    Finder.Droid.Services.ApkInstaller
+                        .OpenInstallPermissionSettings(_context);
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "⚠️ *Permission required.*\n\n" +
+                        "The device needs 'Install unknown apps' enabled for Finder.\n\n" +
+                        "A settings screen has been opened on the device.\n" +
+                        "Enable it, then send `/update` again to retry.");
+                    return;
+                }
+
+                // ── Trigger install ───────────────────────────────────────────
+                Finder.Droid.Services.ApkInstaller.Install(_context, apkPath);
+
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"✅ *APK ready! Install prompt launched.*\n\n" +
+                    $"Version: `{requestedVersionStr}`\n\n" +
+                    "📲 Tap *Install* on the device to complete the update.\n" +
+                    "_The app will restart automatically after installation._");
+            }
+            catch (Exception ex)
+            {
+                // Catch-all — never let an update error crash the polling loop
+                try
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"❌ *Unexpected update error:*\n`{ex.Message}`");
+                }
+                catch { /* Silent fail — Telegram may be unreachable */ }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Update notification helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Shows or updates the APK download progress notification.
+        /// Uses an indeterminate progress bar when progress = 0 (connecting).
+        /// Shows a static "done" icon when done = true.
+        /// </summary>
+        private void ShowUpdateProgressNotification(string message, int progress, bool done)
+        {
+            try
+            {
+                var builder = new NotificationCompat.Builder(_context, UPDATE_CHANNEL_ID)
+                    .SetContentTitle("Finder Update")
+                    .SetContentText(message)
+                    .SetSmallIcon(done
+                        ? Android.Resource.Drawable.StatSysDownloadDone
+                        : Android.Resource.Drawable.StatSysDownload)
+                    .SetOngoing(!done)   // Ongoing = cannot be dismissed while downloading
+                    .SetAutoCancel(done) // Auto-dismiss when tapped after completion
+                    .SetOnlyAlertOnce(true); // No repeated sound/vibration on each update
+
+                if (!done)
+                {
+                    // Indeterminate bar while connecting (progress == 0),
+                    // determinate bar once we have a file size
+                    builder.SetProgress(100, progress, progress == 0);
+                }
+
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.Notify(UPDATE_NOTIFICATION_ID, builder.Build());
+            }
+            catch { /* Silent fail — notification must never crash the download */ }
+        }
+
+        /// <summary>Dismisses the update progress notification immediately.</summary>
+        private void CancelUpdateNotification()
+        {
+            try
+            {
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.Cancel(UPDATE_NOTIFICATION_ID);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Creates the Android notification channel for update progress.
+        /// Required on API 26+ (Android 8.0+) — no-op on older versions.
+        /// Called once from the constructor.
+        /// </summary>
+        private void CreateUpdateNotificationChannel()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
+            try
+            {
+                var channel = new NotificationChannel(
+                    UPDATE_CHANNEL_ID,
+                    "App Updates",
+                    NotificationImportance.Low) // Low = no sound, just a progress bar
+                {
+                    Description = "Shows APK download and install progress"
+                };
+
+                // No vibration for a progress bar — that would be annoying
+                channel.EnableVibration(false);
+
                 var nm = (NotificationManager)_context
                     .GetSystemService(Context.NotificationService);
                 nm?.CreateNotificationChannel(channel);

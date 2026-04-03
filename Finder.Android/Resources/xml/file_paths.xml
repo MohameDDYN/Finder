@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+
+	<!--
+        Exposes the app's private external files directory to FileProvider.
+        Used by ApkInstaller.cs to create a safe content:// URI for the
+        downloaded APK file on Android 7.0+ (API 24+).
+
+        Maps to the physical path:
+            /sdcard/Android/data/com.finder.app/files/update/
+
+        ✅ This directory does NOT require WRITE_EXTERNAL_STORAGE on API 29+.
+        ✅ Only our app (and apps we explicitly grant) can read from here.
+        ✅ The authority must match FILE_PROVIDER_AUTHORITY in ApkInstaller.cs.
+    -->
+	<external-files-path
+        name="update_apk"
+        path="update/" />
+
+</paths>
