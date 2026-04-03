@@ -14,11 +14,11 @@ using Finder.Droid.Services;
 using Finder.Models;
 using Newtonsoft.Json;
 using Xamarin.Essentials;
+using Xamarin.Forms;
 
-// ── Alias to avoid ambiguity with Android.Gms.Location.ILocationListener ──
+// ── Alias to avoid ambiguity with Android.Gms.Location.ILocationListener ──────
 using DroidLocation = Android.Locations;
 using AndroidLocation = Android.Locations.Location;
-using Xamarin.Forms;
 
 namespace Finder.Droid.Managers
 {
@@ -28,10 +28,12 @@ namespace Finder.Droid.Managers
         private static DateTime _lastIntervalUpdate = DateTime.MinValue;
         private static DateTime _lastStartupMessage = DateTime.MinValue;
         private static DateTime _lastRestartCommand = DateTime.MinValue;
+        private static DateTime _lastUpdateCommand = DateTime.MinValue;
 
         private const int INTERVAL_COOLDOWN_S = 30;
         private const int STARTUP_COOLDOWN_S = 60;
         private const int RESTART_COOLDOWN_S = 120;
+        private const int UPDATE_COOLDOWN_S = 60;
 
         // ── Poll-interval defaults & limits ───────────────────────────────────
         private const int DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -42,15 +44,9 @@ namespace Finder.Droid.Managers
         private const string PREF_POLL_INTERVAL_MS = "telegram_poll_interval_ms";
         private const string PREF_POLLING_ENABLED = "telegram_polling_enabled";
 
-        // ── Notification channel ──────────────────────────────────────────────
+        // ── Notification channels ─────────────────────────────────────────────
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
-
-        // ── Auto-update command ───────────────────────────────────────────────
-        private static DateTime _lastUpdateCommand = DateTime.MinValue;
-        private const int UPDATE_COOLDOWN_S = 60;
-
-        // Notification channel used for APK download progress display
         private const string UPDATE_CHANNEL_ID = "finder_update_channel";
         private const int UPDATE_NOTIFICATION_ID = 3001;
 
@@ -70,7 +66,8 @@ namespace Finder.Droid.Managers
         {
             _context = context;
             _settingsFilePath = Path.Combine(
-                System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal),
+                System.Environment.GetFolderPath(
+                    System.Environment.SpecialFolder.Personal),
                 "secure_settings.json");
 
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
@@ -80,8 +77,6 @@ namespace Finder.Droid.Managers
             _lastUpdateId = prefs.GetLong(LAST_UPDATE_ID_KEY, 0);
 
             CreateGpsAlertNotificationChannel();
-
-            // Register the notification channel for update download progress
             CreateUpdateNotificationChannel();
         }
 
@@ -99,10 +94,10 @@ namespace Finder.Droid.Managers
 
                 var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
                 bool pollingEnabled = prefs.GetBoolean(PREF_POLLING_ENABLED, true);
-
                 if (!pollingEnabled) return;
 
-                int pollIntervalMs = prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS);
+                int pollIntervalMs = prefs.GetInt(PREF_POLL_INTERVAL_MS,
+                    DEFAULT_POLL_INTERVAL_MS);
                 if (pollIntervalMs < MIN_POLL_INTERVAL_MS)
                     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
 
@@ -110,14 +105,16 @@ namespace Finder.Droid.Managers
 
                 if (sendStartupMessage)
                 {
-                    bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
+                    bool suppress = prefs.GetBoolean(
+                        "suppress_next_startup_message", false);
                     if (suppress)
                     {
                         var editor = prefs.Edit();
                         editor.PutBoolean("suppress_next_startup_message", false);
                         editor.Apply();
                     }
-                    else if ((DateTime.Now - _lastStartupMessage).TotalSeconds > STARTUP_COOLDOWN_S)
+                    else if ((DateTime.Now - _lastStartupMessage).TotalSeconds
+                             > STARTUP_COOLDOWN_S)
                     {
                         _lastStartupMessage = DateTime.Now;
                         _ = Task.Run(async () =>
@@ -130,7 +127,7 @@ namespace Finder.Droid.Managers
                     }
                 }
             }
-            catch { }
+            catch { /* Silent fail */ }
         }
 
         public void Stop()
@@ -179,8 +176,8 @@ namespace Finder.Droid.Managers
         private string GetActiveGpsProvider()
         {
             var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, "fused")
-                   ?? "fused";
+            return prefs.GetString(
+                BackgroundLocationService.PREF_KEY_GPS_PROVIDER, "fused") ?? "fused";
         }
 
         private void BroadcastGpsProvider(string provider)
@@ -210,8 +207,10 @@ namespace Finder.Droid.Managers
                 if (string.IsNullOrEmpty(settings.BotToken) ||
                     string.IsNullOrEmpty(settings.ChatId)) return;
 
-                string url = $"https://api.telegram.org/bot{settings.BotToken}" +
-                              $"/getUpdates?offset={_lastUpdateId + 1}&timeout=5";
+                string url =
+                    $"https://api.telegram.org/bot{settings.BotToken}" +
+                    $"/getUpdates?offset={_lastUpdateId + 1}&timeout=5";
+
                 string json = await _httpClient.GetStringAsync(url);
                 var resp = JsonConvert.DeserializeObject<TelegramUpdateResponse>(json);
 
@@ -241,7 +240,8 @@ namespace Finder.Droid.Managers
         // Command dispatcher
         // ─────────────────────────────────────────────────────────────────────
 
-        private async Task ProcessCommandAsync(string command, AppSettings currentSettings)
+        private async Task ProcessCommandAsync(
+            string command, AppSettings currentSettings)
         {
             try
             {
@@ -265,7 +265,6 @@ namespace Finder.Droid.Managers
                                            "✅ Switch applied immediately.\n" +
                                            "ℹ️ /location always uses raw GPS regardless.";
                                 break;
-
                             case "raw":
                                 BroadcastGpsProvider("raw");
                                 response = "🛰 *GPS provider → Raw GPS*\n\n" +
@@ -274,21 +273,22 @@ namespace Finder.Droid.Managers
                                            "✅ Switch applied immediately.\n" +
                                            "💡 Send /gpsprovider fused to revert.";
                                 break;
-
                             default:
                                 string cur = GetActiveGpsProvider();
-                                response = $"📡 *GPS Provider*\n\n" +
-                                           $"Current: {(cur == "raw" ? "🛰 Raw GPS" : "🔋 Fused (default)")}\n\n" +
-                                           "/gpsprovider fused — battery-efficient (default)\n" +
-                                           "/gpsprovider raw   — hardware GPS (max accuracy)\n\n" +
-                                           "ℹ️ /location *always* uses raw GPS for best accuracy.";
+                                response =
+                                    $"📡 *GPS Provider*\n\n" +
+                                    $"Current: {(cur == "raw" ? "🛰 Raw GPS" : "🔋 Fused (default)")}\n\n" +
+                                    "/gpsprovider fused — battery-efficient (default)\n" +
+                                    "/gpsprovider raw   — hardware GPS (max accuracy)\n\n" +
+                                    "ℹ️ /location *always* uses raw GPS for best accuracy.";
                                 break;
                         }
                         break;
 
                     // ── /interval ────────────────────────────────────────────
                     case "/interval":
-                        if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
+                        if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds
+                            < INTERVAL_COOLDOWN_S)
                         {
                             response = $"⏳ Cooldown active. Wait {INTERVAL_COOLDOWN_S}s.";
                             break;
@@ -301,7 +301,8 @@ namespace Finder.Droid.Managers
                             SaveSettings(currentSettings);
                             await SecureStorage.SetAsync("Interval", ivMs.ToString());
 
-                            var bIntent = new Intent(BackgroundLocationService.ACTION_UPDATE_INTERVAL);
+                            var bIntent = new Intent(
+                                BackgroundLocationService.ACTION_UPDATE_INTERVAL);
                             bIntent.PutExtra("new_interval", ivMs);
                             _context.SendBroadcast(bIntent);
 
@@ -349,20 +350,23 @@ namespace Finder.Droid.Managers
                                     .GetDefaultSharedPreferences(_context).Edit();
                                 ed.PutInt(PREF_POLL_INTERVAL_MS, pollMs);
                                 ed.Apply();
-                                response = $"💾 Saved {pollSec}s — applies on /polling on.";
+                                response =
+                                    $"💾 Saved {pollSec}s — applies when /polling on.";
                             }
                             else
                             {
                                 RestartPollTimer(pollMs);
-                                response = $"🔄 Poll interval → *{pollSec}s*\n" +
-                                           "60s = balanced · 120s = saver · 10s = fastest";
+                                response =
+                                    $"🔄 Poll interval → *{pollSec}s*\n" +
+                                    "60s = balanced · 120s = saver · 10s = fastest";
                             }
                         }
                         else
                         {
                             int curSec = GetSavedPollIntervalMs() / 1000;
-                            response = $"❌ Usage: /pollinterval [sec] (min 10)\n" +
-                                       $"Current: *{curSec}s*";
+                            response =
+                                $"❌ Usage: /pollinterval [sec] (min 10)\n" +
+                                $"Current: *{curSec}s*";
                         }
                         break;
 
@@ -379,17 +383,25 @@ namespace Finder.Droid.Managers
                             ? "🛰 Raw GPS (max accuracy)"
                             : "🔋 Fused (battery saver)";
 
-                        response = $"📍 *Status*\n" +
-                                   $"Tracking:        {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
-                                   $"GPS provider:    {providerLabel}\n" +
-                                   $"Telegram sends:  {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
-                                   $"Command polling: {(pollEnabled ? $"✅ Every {pollSecs}s" : "⏸ Disabled")}\n" +
-                                   $"Auto-start:      {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
-                                   $"Token:           {MaskToken(currentSettings.BotToken)}\n" +
-                                   $"Chat ID:         {currentSettings.ChatId}\n" +
-                                   $"Send interval:   {currentSettings.Interval} ms\n" +
-                                   $"Data files:      {statusFiles.Count}\n" +
-                                   $"Device time:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                        // Read installed version from AssemblyInfo
+                        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+                        var ver = asm.GetName().Version;
+                        string versionStr =
+                            $"{ver.Major}.{ver.Minor}.{ver.Build}";
+
+                        response =
+                            $"📍 *Status*\n" +
+                            $"Tracking:        {(IsServiceRunning() ? "✅ Active" : "❌ Stopped")}\n" +
+                            $"GPS provider:    {providerLabel}\n" +
+                            $"Telegram sends:  {(sendsPaused ? "⏸ Paused" : "▶️ Active")}\n" +
+                            $"Command polling: {(pollEnabled ? $"✅ Every {pollSecs}s" : "⏸ Disabled")}\n" +
+                            $"Auto-start:      {(autoStart ? "✅ Enabled" : "❌ Disabled")}\n" +
+                            $"Token:           {MaskToken(currentSettings.BotToken)}\n" +
+                            $"Chat ID:         {currentSettings.ChatId}\n" +
+                            $"Send interval:   {currentSettings.Interval} ms\n" +
+                            $"Data files:      {statusFiles.Count}\n" +
+                            $"App version:     v{versionStr}\n" +
+                            $"Device time:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
 
                         if (sendsPaused) response += "\n\n💡 /resumelocation to resume.";
                         if (!pollEnabled) response += "\n💡 /polling on to re-enable.";
@@ -412,7 +424,8 @@ namespace Finder.Droid.Managers
 
                     // ── /restart ─────────────────────────────────────────────
                     case "/restart":
-                        if ((DateTime.Now - _lastRestartCommand).TotalSeconds < RESTART_COOLDOWN_S)
+                        if ((DateTime.Now - _lastRestartCommand).TotalSeconds
+                            < RESTART_COOLDOWN_S)
                         {
                             int rem = RESTART_COOLDOWN_S -
                                 (int)(DateTime.Now - _lastRestartCommand).TotalSeconds;
@@ -421,9 +434,11 @@ namespace Finder.Droid.Managers
                         }
                         _lastRestartCommand = DateTime.Now;
 
-                        var suppressPrefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                        var suppressPrefs = PreferenceManager
+                            .GetDefaultSharedPreferences(_context);
                         var suppressEditor = suppressPrefs.Edit();
-                        suppressEditor.PutBoolean("suppress_next_startup_message", true);
+                        suppressEditor.PutBoolean(
+                            "suppress_next_startup_message", true);
                         suppressEditor.Apply();
 
                         StopService();
@@ -462,12 +477,12 @@ namespace Finder.Droid.Managers
 
                     // ── /yesterday ───────────────────────────────────────────
                     case "/yesterday":
-                        await HandleGeoJsonReportAsync(currentSettings,
-                            DateTime.Today.AddDays(-1));
+                        await HandleGeoJsonReportAsync(
+                            currentSettings, DateTime.Today.AddDays(-1));
                         response = null;
                         break;
 
-                    // ── /report ──────────────────────────────────────────────
+                    // ── /report YYYY-MM-DD ────────────────────────────────────
                     case "/report":
                         if (!string.IsNullOrEmpty(param) &&
                             DateTime.TryParseExact(param, "yyyy-MM-dd",
@@ -486,16 +501,18 @@ namespace Finder.Droid.Managers
                         response = files.Count == 0
                             ? "📂 No data files found."
                             : "📂 *Available files:*\n" +
-                              string.Join("\n", files.Select(f => $"• {Path.GetFileName(f)}"));
+                              string.Join("\n",
+                                  files.Select(f => $"• {Path.GetFileName(f)}"));
                         break;
 
-                    // ── /cleanup ─────────────────────────────────────────────
+                    // ── /cleanup [days] ───────────────────────────────────────
                     case "/cleanup":
                         int keepDays = int.TryParse(param, out int kd) ? kd : 30;
                         int before = _geoJsonManager.GetAvailableDataFiles().Count;
                         await _geoJsonManager.CleanupOldFiles(keepDays);
                         int after = _geoJsonManager.GetAvailableDataFiles().Count;
-                        response = $"🧹 Removed {before - after} files older than {keepDays} days.";
+                        response =
+                            $"🧹 Removed {before - after} files older than {keepDays} days.";
                         break;
 
                     // ── /gpsstatus ───────────────────────────────────────────
@@ -505,14 +522,16 @@ namespace Finder.Droid.Managers
                         int battery = GetBatteryLevel();
                         string gpsProv = GetActiveGpsProvider();
 
-                        response = "📡 *GPS Status*\n" +
-                                   $"GPS chip:  {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
-                                   $"Provider:  {(gpsProv == "raw" ? "🛰 Raw GPS" : "🔋 Fused")}\n" +
-                                   $"Service:   {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
-                                   $"Battery:   {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
-                                   $"Time:      {DateTime.Now:HH:mm:ss}";
+                        response =
+                            "📡 *GPS Status*\n" +
+                            $"GPS chip:  {(gpsOn ? "✅ Enabled" : "❌ Disabled")}\n" +
+                            $"Provider:  {(gpsProv == "raw" ? "🛰 Raw GPS" : "🔋 Fused")}\n" +
+                            $"Service:   {(svcActive ? "✅ Running" : "⏹ Stopped")}\n" +
+                            $"Battery:   {(battery >= 0 ? $"{battery}%" : "Unknown")}\n" +
+                            $"Time:      {DateTime.Now:HH:mm:ss}";
                         if (!gpsOn)
-                            response += "\n\n💡 /enablelocation to request GPS activation.";
+                            response +=
+                                "\n\n💡 /enablelocation to request GPS activation.";
                         break;
 
                     // ── /enablelocation ──────────────────────────────────────
@@ -524,12 +543,13 @@ namespace Finder.Droid.Managers
                         else
                         {
                             ShowEnableLocationNotification();
-                            response = "📲 Notification sent — tap it to open Location Settings.";
+                            response =
+                                "📲 Notification sent — tap it to open Location Settings.";
                         }
                         break;
 
                     // ── /location ────────────────────────────────────────────
-                    // Always uses raw GPS regardless of the active provider setting.
+                    // Always uses raw GPS regardless of the active provider.
                     case "/location":
                         await HandleLocationCommandAsync(currentSettings);
                         response = null;
@@ -544,9 +564,10 @@ namespace Finder.Droid.Managers
                         else
                         {
                             BroadcastSendingPaused(true);
-                            response = "⏸ *Location sends paused*\n" +
-                                       "GPS + GeoJSON still running.\n" +
-                                       "Send /resumelocation to turn back on.";
+                            response =
+                                "⏸ *Location sends paused*\n" +
+                                "GPS + GeoJSON still running.\n" +
+                                "Send /resumelocation to turn back on.";
                         }
                         break;
 
@@ -569,12 +590,14 @@ namespace Finder.Droid.Managers
                         {
                             case "on":
                                 Preferences.Set(
-                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START,
+                                    true);
                                 response = "✅ Auto-start enabled.";
                                 break;
                             case "off":
                                 Preferences.Set(
-                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START,
+                                    false);
                                 response = "❌ Auto-start disabled.";
                                 break;
                             default:
@@ -583,61 +606,61 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /version ─────────────────────────────────────────────────────────
-                    // Reports the currently installed app version back to the admin.
-                    // Use this to confirm which version is running before sending /update.
+                    // ── /version ─────────────────────────────────────────────
                     case "/version":
-                        var runningAssembly = System.Reflection.Assembly.GetExecutingAssembly();
+                        var runningAssembly = System.Reflection.Assembly
+                            .GetExecutingAssembly();
                         var runningVersion = runningAssembly.GetName().Version;
-                        response = $"📦 *Finder — Installed Version*\n\n" +
-                                   $"Version: `{runningVersion.Major}.{runningVersion.Minor}.{runningVersion.Build}`\n\n" +
-                                   $"To push an update:\n" +
-                                   $"`/update [version] [url]`\n\n" +
-                                   $"Example:\n" +
-                                   $"`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`";
+                        response =
+                            $"📦 *Finder — Installed Version*\n\n" +
+                            $"Version: `{runningVersion.Major}.{runningVersion.Minor}" +
+                            $".{runningVersion.Build}`\n\n" +
+                            $"To push an update:\n" +
+                            $"`/update [version] [url]`\n\n" +
+                            $"Example:\n" +
+                            $"`/update 1.0.2 https://drive.usercontent.google.com/" +
+                            $"download?id=FILE_ID&export=download&confirm=t`";
                         break;
 
-                    // ── /update [version] [url] ──────────────────────────────────────────
-                    // Checks if the given version is newer than the installed one.
-                    // If newer: downloads the APK from [url] and triggers the installer.
-                    // Supported hosts: Google Drive, Dropbox, any direct HTTPS URL.
-                    //
+                    // ── /update [version] [url] ───────────────────────────────
+                    // Downloads the APK from [url] and triggers the Android installer.
+                    // Supported: Google Drive, Dropbox, any direct HTTPS URL.
                     // Usage:
-                    //   /update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID
+                    //   /update 1.0.2 https://drive.usercontent.google.com/download?id=FILE_ID&export=download&confirm=t
                     //   /update 1.0.2 https://www.dropbox.com/s/xxx/Finder.apk?dl=1
                     case "/update":
-                        // Delegate to the dedicated handler — it sends its own Telegram replies
                         await HandleUpdateCommandAsync(param, currentSettings);
-                        response = null; // prevent the generic reply below from also sending
+                        response = null;
                         break;
 
-                    // ── /cmd (help) ──────────────────────────────────────────
+                    // ── /cmd (help) ───────────────────────────────────────────
                     case "/cmd":
                     default:
-                        response = "📋 *Available commands:*\n\n" +
-                                   "📍 *Tracking*\n" +
-                                   "/start · /stop · /restart · /status\n" +
-                                   "/autostart on|off\n\n" +
-                                   "🛰 *GPS Provider*\n" +
-                                   "/gpsprovider fused — battery-efficient (default)\n" +
-                                   "/gpsprovider raw   — hardware GPS (max accuracy)\n" +
-                                   "/gpsstatus · /enablelocation\n" +
-                                   "/location — current fix *(always raw GPS)*\n\n" +
-                                   "📡 *Polling*\n" +
-                                   "/polling on|off\n" +
-                                   "/pollinterval [sec] (min 10)\n\n" +
-                                   "📤 *Location sends*\n" +
-                                   "/interval [ms] (min 5000)\n" +
-                                   "/pauselocation · /resumelocation\n\n" +
-                                   "📂 *Data*\n" +
-                                   "/today · /yesterday\n" +
-                                   "/report YYYY-MM-DD\n" +
-                                   "/files · /cleanup [days]\n\n" +
-                                   "⚙️ *Config*\n" +
-                                   "/token [token] · /chatid [id]\n" +
-                                   "⬆️ *App Update*\n" +
-                                   "/version — show installed version\n" +
-                                   "/update [ver] [url] — push new APK\n\n";
+                        response =
+                            "📋 *Available commands:*\n\n" +
+                            "📍 *Tracking*\n" +
+                            "/start · /stop · /restart · /status\n" +
+                            "/autostart on|off\n\n" +
+                            "🛰 *GPS Provider*\n" +
+                            "/gpsprovider fused — battery-efficient (default)\n" +
+                            "/gpsprovider raw   — hardware GPS (max accuracy)\n" +
+                            "/gpsstatus · /enablelocation\n" +
+                            "/location — current fix *(always raw GPS)*\n\n" +
+                            "📡 *Polling*\n" +
+                            "/polling on|off\n" +
+                            "/pollinterval [sec] (min 10)\n\n" +
+                            "📤 *Location sends*\n" +
+                            "/interval [ms] (min 5000)\n" +
+                            "/pauselocation · /resumelocation\n\n" +
+                            "📂 *Data*\n" +
+                            "/today · /yesterday\n" +
+                            "/report YYYY-MM-DD\n" +
+                            "/files · /cleanup [days]\n\n" +
+                            "⚙️ *Config*\n" +
+                            "/token [token] · /chatid [id]\n\n" +
+                            "⬆️ *App Update*\n" +
+                            "/version — show installed version\n" +
+                            "/update [ver] [url] — push new APK\n";
                         break;
                 }
 
@@ -665,38 +688,36 @@ namespace Finder.Droid.Managers
                 {
                     var lm = (DroidLocation.LocationManager)_context
                         .GetSystemService(Context.LocationService);
-
-                    if (lm != null &&
-                        lm.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider))
-                    {
-                        rawLocation = lm.GetLastKnownLocation(
-                            DroidLocation.LocationManager.GpsProvider);
-                    }
+                    rawLocation = lm?.GetLastKnownLocation(
+                        DroidLocation.LocationManager.GpsProvider);
                 }
                 catch { }
 
-                // Step 2: stale or missing — request a fresh raw fix (15 s timeout)
-                bool isStale = rawLocation != null &&
-                    (DateTime.UtcNow -
-                     DateTimeOffset.FromUnixTimeMilliseconds(rawLocation.Time).UtcDateTime)
-                    .TotalSeconds > 30;
+                // Step 2: request a fresh fix (up to 20 seconds)
+                if (rawLocation == null)
+                    rawLocation = await GetFreshRawGpsFixAsync(20);
 
-                if (rawLocation == null || isStale)
-                    rawLocation = await GetFreshRawGpsFixAsync(timeoutSeconds: 15);
-
-                // Step 3: raw GPS timed out — fall back to Essentials
+                // Step 3: fall back to fused last-known if raw GPS is unavailable
                 if (rawLocation == null)
                 {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "⚠️ Raw GPS timed out — falling back to last known location…");
-
-                    var fallback = await Geolocation.GetLastKnownLocationAsync();
+                    AndroidLocation fallback = null;
+                    try
+                    {
+                        var lm = (DroidLocation.LocationManager)_context
+                            .GetSystemService(Context.LocationService);
+                        fallback = lm?.GetLastKnownLocation(
+                            DroidLocation.LocationManager.NetworkProvider);
+                        if (fallback == null)
+                            fallback = lm?.GetLastKnownLocation(
+                                DroidLocation.LocationManager.PassiveProvider);
+                    }
+                    catch { }
 
                     if (fallback == null)
                     {
                         await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                            "❌ Could not get location.\n" +
-                            "Make sure GPS is enabled and you have a clear sky view.");
+                            "❌ No location available.\n" +
+                            "Make sure GPS is enabled and try again in a moment.");
                         return;
                     }
 
@@ -717,7 +738,7 @@ namespace Finder.Droid.Managers
                     return;
                 }
 
-                // Step 4: send raw GPS fix
+                // Step 4: send the raw GPS fix
                 string lat = rawLocation.Latitude.ToString(CultureInfo.InvariantCulture);
                 string lon = rawLocation.Longitude.ToString(CultureInfo.InvariantCulture);
                 string maps = $"https://www.google.com/maps?q={lat},{lon}";
@@ -751,13 +772,12 @@ namespace Finder.Droid.Managers
 
         /// <summary>
         /// Requests a single fresh raw GPS fix via a one-shot ILocationListener.
-        /// Returns null if no fix arrives within <paramref name="timeoutSeconds"/>.
+        /// Returns null if no fix arrives within timeoutSeconds.
         /// Uses positional long/float args — no named parameters (avoids CS1739).
         /// </summary>
         private Task<AndroidLocation> GetFreshRawGpsFixAsync(int timeoutSeconds)
         {
             var tcs = new TaskCompletionSource<AndroidLocation>();
-
             try
             {
                 var lm = (DroidLocation.LocationManager)_context
@@ -770,22 +790,18 @@ namespace Finder.Droid.Managers
                     return tcs.Task;
                 }
 
-                var listener = new SingleShotLocationListener(fix =>
-                    tcs.TrySetResult(fix));
+                var listener = new SingleShotLocationListener(
+                    fix => tcs.TrySetResult(fix));
 
-                // Positional args: provider, minTimeMs (long), minDistanceM (float), listener
-                // Named parameters not supported by Xamarin binding — use positional only
                 lm.RequestLocationUpdates(
                     DroidLocation.LocationManager.GpsProvider,
-                    0L,    // minTimeMs — long
-                    0f,    // minDistanceM — float
+                    0L,    // minTimeMs (long)
+                    0f,    // minDistanceM (float)
                     listener);
 
-                // Timeout guard
                 Task.Delay(timeoutSeconds * 1000).ContinueWith(_ =>
                 {
-                    try { lm.RemoveUpdates(listener); }
-                    catch { }
+                    try { lm.RemoveUpdates(listener); } catch { }
                     tcs.TrySetResult(null);
                 });
             }
@@ -793,7 +809,6 @@ namespace Finder.Droid.Managers
             {
                 tcs.TrySetResult(null);
             }
-
             return tcs.Task;
         }
 
@@ -828,23 +843,280 @@ namespace Finder.Droid.Managers
                     return;
                 }
 
-                using var content = new MultipartFormDataContent();
-                using var fileStream = File.OpenRead(filePath);
-                using var fileContent = new System.Net.Http.StreamContent(fileStream);
-                fileContent.Headers.ContentType =
-                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                content.Add(fileContent, "document", Path.GetFileName(filePath));
+                string geoJson = await _geoJsonManager.GenerateGeoJsonForDate(date);
+                if (string.IsNullOrEmpty(geoJson))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"⚠️ Could not generate GeoJSON for {date:yyyy-MM-dd}.");
+                    return;
+                }
 
-                string url =
-                    $"https://api.telegram.org/bot{settings.BotToken}" +
-                    $"/sendDocument?chat_id={settings.ChatId}" +
-                    $"&caption=📍 GeoJSON report for {date:yyyy-MM-dd}";
-                await _httpClient.PostAsync(url, content);
+                // Write to a temp file and send as document
+                string tempPath = Path.Combine(
+                    System.Environment.GetFolderPath(
+                        System.Environment.SpecialFolder.Personal),
+                    $"report_{date:yyyy-MM-dd}.geojson");
+
+                File.WriteAllText(tempPath, geoJson);
+
+                using (var content = new MultipartFormDataContent())
+                using (var fileStream = File.OpenRead(tempPath))
+                using (var fileContent = new System.Net.Http.StreamContent(fileStream))
+                {
+                    fileContent.Headers.ContentType =
+                        new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                    content.Add(fileContent, "document",
+                        Path.GetFileName(tempPath));
+
+                    string url =
+                        $"https://api.telegram.org/bot{settings.BotToken}" +
+                        $"/sendDocument?chat_id={settings.ChatId}" +
+                        $"&caption=📍 GeoJSON report for {date:yyyy-MM-dd}";
+
+                    await _httpClient.PostAsync(url, content);
+                }
             }
             catch (Exception ex)
             {
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                     $"❌ Report error: {ex.Message}");
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Auto-update handler
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Full handler for the /update [version] [url] command.
+        ///
+        /// Flow:
+        ///   1. Validate parameters and parse version.
+        ///   2. Compare requested version against installed AssemblyVersion.
+        ///   3. If newer: notify admin + show in-app progress card.
+        ///   4. Download APK via ApkDownloaderService (returns ApkDownloadResult).
+        ///   5. Validate APK magic bytes inside the service — reject HTML files.
+        ///   6. Trigger Android system installer via ApkInstaller.
+        ///   7. Send Telegram status reply at every stage.
+        /// </summary>
+        private async Task HandleUpdateCommandAsync(
+            string param, AppSettings settings)
+        {
+            try
+            {
+                // ── Cooldown guard ────────────────────────────────────────────
+                if ((DateTime.Now - _lastUpdateCommand).TotalSeconds < UPDATE_COOLDOWN_S)
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"⏳ Update cooldown active. " +
+                        $"Please wait {UPDATE_COOLDOWN_S} seconds between requests.");
+                    return;
+                }
+
+                // ── Parameter validation ──────────────────────────────────────
+                if (string.IsNullOrWhiteSpace(param))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Missing parameters.*\n\n" +
+                        "Usage: `/update [version] [url]`\n\n" +
+                        "Example:\n" +
+                        "`/update 1.0.2 https://drive.usercontent.google.com/" +
+                        "download?id=FILE_ID&export=download&confirm=t`");
+                    return;
+                }
+
+                string[] updateParts = param.Split(
+                    new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+
+                if (updateParts.Length < 2 ||
+                    string.IsNullOrWhiteSpace(updateParts[0]) ||
+                    string.IsNullOrWhiteSpace(updateParts[1]))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Invalid format.*\n\n" +
+                        "Usage: `/update [version] [url]`\n\n" +
+                        "Both version and URL are required.\n" +
+                        "Example: `/update 1.0.2 https://...`");
+                    return;
+                }
+
+                string requestedVersionStr = updateParts[0].Trim();
+                string apkUrl = updateParts[1].Trim();
+
+                // ── Version parsing ───────────────────────────────────────────
+                Version requestedVersion;
+                if (!Version.TryParse(requestedVersionStr, out requestedVersion))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"❌ *Invalid version format:* `{requestedVersionStr}`\n\n" +
+                        "Use dot-separated numbers: `1.0.2` or `1.0.2.0`");
+                    return;
+                }
+
+                // ── Version comparison ────────────────────────────────────────
+                var installedVersion = System.Reflection.Assembly
+                    .GetExecutingAssembly()
+                    .GetName()
+                    .Version;
+
+                var installed3 = new Version(
+                    installedVersion.Major,
+                    installedVersion.Minor,
+                    installedVersion.Build);
+
+                var requested3 = new Version(
+                    requestedVersion.Major,
+                    requestedVersion.Minor,
+                    requestedVersion.Build > 0 ? requestedVersion.Build : 0);
+
+                if (requested3 <= installed3)
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"✅ *Already up to date.*\n\n" +
+                        $"Installed: `{installed3.Major}.{installed3.Minor}" +
+                        $".{installed3.Build}`\n" +
+                        $"Requested: `{requestedVersionStr}` — not newer.\n\n" +
+                        "Send `/version` to confirm the running version.");
+                    return;
+                }
+
+                // ── All checks passed — begin update ──────────────────────────
+                _lastUpdateCommand = DateTime.Now;
+
+                string versionInfo =
+                    $"v{installed3.Major}.{installed3.Minor}.{installed3.Build}" +
+                    $" → v{requestedVersionStr}";
+
+                // Notify admin via Telegram
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"📥 *Update queued!*\n\n" +
+                    $"Installed: `{installed3.Major}.{installed3.Minor}" +
+                    $".{installed3.Build}`\n" +
+                    $"New:       `{requestedVersionStr}`\n\n" +
+                    "⬇️ Downloading APK now…\n" +
+                    "_Progress visible in the app UI._");
+
+                // Show in-app progress card at 0%
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_STARTED,
+                    versionInfo);
+
+                // Show Android status-bar notification
+                ShowUpdateProgressNotification(
+                    "Downloading Finder update…", 0, done: false);
+
+                // ── Download ──────────────────────────────────────────────────
+                var downloader = new ApkDownloaderService(_context);
+                int lastNotifiedPct = -1;
+
+                // ApkDownloaderService.DownloadApkAsync returns ApkDownloadResult
+                // (replaces the illegal async out parameter)
+                var downloadResult = await downloader.DownloadApkAsync(
+                    apkUrl,
+                    progress =>
+                    {
+                        // Update in-app progress card
+                        MessagingCenter.Send<object, string>(
+                            this,
+                            Finder.ViewModels.MainViewModel.MSG_UPDATE_PROGRESS,
+                            progress.ToString());
+
+                        // Throttle notification bar to every 5% change
+                        if (progress >= lastNotifiedPct + 5 || progress == 100)
+                        {
+                            lastNotifiedPct = progress;
+                            ShowUpdateProgressNotification(
+                                $"Downloading Finder update… {progress}%",
+                                progress,
+                                done: false);
+                        }
+                    });
+
+                // ── Download or validation failed ─────────────────────────────
+                if (!downloadResult.IsSuccess)
+                {
+                    CancelUpdateNotification();
+
+                    string failMsg = string.IsNullOrEmpty(downloadResult.FailReason)
+                        ? "Unknown error. Check URL and internet connection."
+                        : downloadResult.FailReason;
+
+                    // Notify in-app progress card — error state (auto-hides in 5s)
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        failMsg);
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "❌ *Download or validation failed.*\n\n" +
+                        $"Reason: `{failMsg}`\n\n" +
+                        "💡 *Quick fix for Google Drive:*\n" +
+                        "Use this exact URL format:\n" +
+                        "`https://drive.usercontent.google.com/download" +
+                        "?id=YOUR_FILE_ID&export=download&confirm=t`\n\n" +
+                        "And set the file to *Anyone with the link* → Viewer.");
+                    return;
+                }
+
+                string apkPath = downloadResult.FilePath;
+
+                // ── Download complete → install stage ─────────────────────────
+                ShowUpdateProgressNotification(
+                    "Download complete! Tap to install.", 100, done: true);
+
+                // Notify in-app card → "Ready to install" stage
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_INSTALLING,
+                    versionInfo);
+
+                // ── Check install permission (Android 8.0+) ───────────────────
+                if (!ApkInstaller.CanInstallPackages(_context))
+                {
+                    ApkInstaller.OpenInstallPermissionSettings(_context);
+
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        "Enable 'Install unknown apps' in Settings, then retry.");
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "⚠️ *Permission required.*\n\n" +
+                        "'Install unknown apps' must be enabled for Finder.\n\n" +
+                        "A settings screen has opened on the device.\n" +
+                        "Enable it, then send `/update` again.");
+                    return;
+                }
+
+                // ── Trigger Android system installer ──────────────────────────
+                ApkInstaller.Install(_context, apkPath);
+
+                // Notify in-app card → complete state (auto-hides after 4s)
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_COMPLETE,
+                    $"Tap Install on the device to finish — {versionInfo}");
+
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"✅ *APK ready! Install prompt launched.*\n\n" +
+                    $"Version: `{requestedVersionStr}`\n\n" +
+                    "📲 Tap *Install* on the device to complete the update.\n" +
+                    "_The app restarts automatically after installation._");
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        ex.Message);
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"❌ *Unexpected update error:*\n`{ex.Message}`");
+                }
+                catch { }
             }
         }
 
@@ -907,7 +1179,8 @@ namespace Finder.Droid.Managers
 
             try
             {
-                var intent = new Intent(BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
+                var intent = new Intent(
+                    BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
                 intent.PutExtra("paused", paused);
                 _context.SendBroadcast(intent);
             }
@@ -924,7 +1197,8 @@ namespace Finder.Droid.Managers
             {
                 var lm = (DroidLocation.LocationManager)_context
                     .GetSystemService(Context.LocationService);
-                return lm?.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider) == true;
+                return lm?.IsProviderEnabled(
+                    DroidLocation.LocationManager.GpsProvider) == true;
             }
             catch { return false; }
         }
@@ -953,10 +1227,12 @@ namespace Finder.Droid.Managers
                 var pendingFlags = Build.VERSION.SdkInt >= BuildVersionCodes.M
                     ? PendingIntentFlags.Immutable
                     : (PendingIntentFlags)0;
+
                 var pendingIntent = PendingIntent.GetActivity(
                     _context, 0, intent, pendingFlags);
 
-                var builder = new NotificationCompat.Builder(_context, GPS_ALERT_CHANNEL_ID)
+                var builder = new NotificationCompat.Builder(
+                        _context, GPS_ALERT_CHANNEL_ID)
                     .SetContentTitle("Enable GPS")
                     .SetContentText("Tap to open Location Settings")
                     .SetSmallIcon(Android.Resource.Drawable.IcDialogMap)
@@ -980,10 +1256,11 @@ namespace Finder.Droid.Managers
         {
             try
             {
-                string url = $"https://api.telegram.org/bot{botToken}/sendMessage" +
-                             $"?chat_id={chatId}" +
-                             $"&text={Uri.EscapeDataString(message)}" +
-                             $"&parse_mode=Markdown";
+                string url =
+                    $"https://api.telegram.org/bot{botToken}/sendMessage" +
+                    $"?chat_id={chatId}" +
+                    $"&text={Uri.EscapeDataString(message)}" +
+                    $"&parse_mode=Markdown";
                 await _httpClient.GetStringAsync(url);
             }
             catch { }
@@ -1021,11 +1298,51 @@ namespace Finder.Droid.Managers
         private static string MaskToken(string token)
         {
             if (string.IsNullOrEmpty(token) || token.Length <= 8) return "***";
-            return token[..4] + "****" + token[^4..];
+            return token.Substring(0, 4) + "****" + token.Substring(token.Length - 4);
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Notification channel
+        // Update notification helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        private void ShowUpdateProgressNotification(
+            string message, int progress, bool done)
+        {
+            try
+            {
+                var builder = new NotificationCompat.Builder(_context, UPDATE_CHANNEL_ID)
+                    .SetContentTitle("Finder Update")
+                    .SetContentText(message)
+                    .SetSmallIcon(done
+                        ? Android.Resource.Drawable.StatSysDownloadDone
+                        : Android.Resource.Drawable.StatSysDownload)
+                    .SetOngoing(!done)
+                    .SetAutoCancel(done)
+                    .SetOnlyAlertOnce(true);
+
+                if (!done)
+                    builder.SetProgress(100, progress, progress == 0);
+
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.Notify(UPDATE_NOTIFICATION_ID, builder.Build());
+            }
+            catch { }
+        }
+
+        private void CancelUpdateNotification()
+        {
+            try
+            {
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.Cancel(UPDATE_NOTIFICATION_ID);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Notification channel setup
         // ─────────────────────────────────────────────────────────────────────
 
         private void CreateGpsAlertNotificationChannel()
@@ -1044,305 +1361,15 @@ namespace Finder.Droid.Managers
             catch { }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // Auto-update handler
-        // ─────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Full handler for the /update [version] [url] command.
-        ///
-        /// Sends MessagingCenter messages at each stage so MainPage.xaml
-        /// shows a live progress card inside the app UI.
-        ///
-        /// Message keys match MainViewModel constants:
-        ///   MSG_UPDATE_STARTED    → card appears, reset to 0%
-        ///   MSG_UPDATE_PROGRESS   → progress bar + percentage updated
-        ///   MSG_UPDATE_INSTALLING → "Ready to install!" stage
-        ///   MSG_UPDATE_COMPLETE   → "Done!" then auto-hide after 4s
-        ///   MSG_UPDATE_FAILED     → error message then auto-hide after 5s
-        /// </summary>
-        private async Task HandleUpdateCommandAsync(string param, AppSettings settings)
-        {
-            try
-            {
-                // ── Cooldown guard ────────────────────────────────────────────
-                if ((DateTime.Now - _lastUpdateCommand).TotalSeconds < UPDATE_COOLDOWN_S)
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"⏳ Update cooldown active. " +
-                        $"Please wait {UPDATE_COOLDOWN_S} seconds between requests.");
-                    return;
-                }
-
-                // ── Parameter validation ──────────────────────────────────────
-                if (string.IsNullOrWhiteSpace(param))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Missing parameters.*\n\n" +
-                        "Usage: `/update [version] [url]`\n\n" +
-                        "Example:\n" +
-                        "`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`");
-                    return;
-                }
-
-                string[] updateParts = param.Split(
-                    new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
-
-                if (updateParts.Length < 2 ||
-                    string.IsNullOrWhiteSpace(updateParts[0]) ||
-                    string.IsNullOrWhiteSpace(updateParts[1]))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Invalid format.*\n\n" +
-                        "Usage: `/update [version] [url]`\n\n" +
-                        "Both version and URL are required.\n" +
-                        "Example: `/update 1.0.2 https://...`");
-                    return;
-                }
-
-                string requestedVersionStr = updateParts[0].Trim();
-                string apkUrl = updateParts[1].Trim();
-
-                // ── Version parsing ───────────────────────────────────────────
-                if (!Version.TryParse(requestedVersionStr, out Version requestedVersion))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"❌ *Invalid version format:* `{requestedVersionStr}`\n\n" +
-                        "Use dot-separated numbers: `1.0.2` or `1.0.2.0`");
-                    return;
-                }
-
-                // ── Version comparison ────────────────────────────────────────
-                var installedVersion = System.Reflection.Assembly
-                    .GetExecutingAssembly()
-                    .GetName()
-                    .Version;
-
-                var installed3 = new Version(
-                    installedVersion.Major,
-                    installedVersion.Minor,
-                    installedVersion.Build);
-
-                var requested3 = new Version(
-                    requestedVersion.Major,
-                    requestedVersion.Minor,
-                    requestedVersion.Build > 0 ? requestedVersion.Build : 0);
-
-                if (requested3 <= installed3)
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"✅ *Already up to date.*\n\n" +
-                        $"Installed: `{installed3.Major}.{installed3.Minor}.{installed3.Build}`\n" +
-                        $"Requested: `{requestedVersionStr}` — not newer.\n\n" +
-                        "Send `/version` to confirm the running version.");
-                    return;
-                }
-
-                // ── All checks passed — start update process ──────────────────
-                _lastUpdateCommand = DateTime.Now;
-
-                string versionInfo =
-                    $"v{installed3.Major}.{installed3.Minor}.{installed3.Build}" +
-                    $" → v{requestedVersionStr}";
-
-                // ── Notify admin via Telegram ─────────────────────────────────
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"📥 *Update queued!*\n\n" +
-                    $"Installed: `{installed3.Major}.{installed3.Minor}.{installed3.Build}`\n" +
-                    $"New:       `{requestedVersionStr}`\n\n" +
-                    "⬇️ Downloading APK now…\n" +
-                    "_Progress visible in the app UI._");
-
-                // ── Notify app UI → show progress card at 0% ─────────────────
-                MessagingCenter.Send<object, string>(
-                    this,
-                    Finder.ViewModels.MainViewModel.MSG_UPDATE_STARTED,
-                    versionInfo);
-
-                // ── Show Android notification (status bar) ────────────────────
-                ShowUpdateProgressNotification("Downloading Finder update…", 0, done: false);
-
-                // ── Download ──────────────────────────────────────────────────
-                var downloader = new Finder.Droid.Services.ApkDownloaderService(_context);
-
-                int lastNotifiedPct = -1;
-
-                string apkPath = await downloader.DownloadApkAsync(
-                    apkUrl,
-                    progress =>
-                    {
-                        // ── Update app UI progress card ───────────────────────
-                        MessagingCenter.Send<object, string>(
-                            this,
-                            Finder.ViewModels.MainViewModel.MSG_UPDATE_PROGRESS,
-                            progress.ToString());
-
-                        // ── Throttle notification updates to every 5% ─────────
-                        // Avoids flooding the notification manager
-                        if (progress >= lastNotifiedPct + 5 || progress == 100)
-                        {
-                            lastNotifiedPct = progress;
-                            ShowUpdateProgressNotification(
-                                $"Downloading Finder update… {progress}%",
-                                progress,
-                                done: false);
-                        }
-                    });
-
-                // ── Download failed ───────────────────────────────────────────
-                if (string.IsNullOrEmpty(apkPath))
-                {
-                    CancelUpdateNotification();
-
-                    string failReason = "Check URL and internet connection.";
-
-                    // Notify app UI → show error state on progress card
-                    MessagingCenter.Send<object, string>(
-                        this,
-                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
-                        failReason);
-
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Download failed.*\n\n" +
-                        "Possible causes:\n" +
-                        "• URL is incorrect or expired\n" +
-                        "• Google Drive link is not public\n" +
-                        "• No internet connection on device\n\n" +
-                        "Check the URL and try again.");
-                    return;
-                }
-
-                // ── Download complete → install stage ─────────────────────────
-                ShowUpdateProgressNotification(
-                    "Download complete! Tap to install.", 100, done: true);
-
-                // Notify app UI → "Ready to install" stage
-                MessagingCenter.Send<object, string>(
-                    this,
-                    Finder.ViewModels.MainViewModel.MSG_UPDATE_INSTALLING,
-                    versionInfo);
-
-                // ── Check install permission (Android 8.0+) ───────────────────
-                if (!Finder.Droid.Services.ApkInstaller.CanInstallPackages(_context))
-                {
-                    Finder.Droid.Services.ApkInstaller
-                        .OpenInstallPermissionSettings(_context);
-
-                    MessagingCenter.Send<object, string>(
-                        this,
-                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
-                        "Enable 'Install unknown apps' in Settings, then retry.");
-
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "⚠️ *Permission required.*\n\n" +
-                        "'Install unknown apps' must be enabled for Finder.\n\n" +
-                        "A settings screen has opened on the device.\n" +
-                        "Enable it, then send `/update` again.");
-                    return;
-                }
-
-                // ── Trigger system installer ──────────────────────────────────
-                Finder.Droid.Services.ApkInstaller.Install(_context, apkPath);
-
-                // Notify app UI → complete state (auto-hides after 4 seconds)
-                MessagingCenter.Send<object, string>(
-                    this,
-                    Finder.ViewModels.MainViewModel.MSG_UPDATE_COMPLETE,
-                    $"Tap Install on the device to finish — {versionInfo}");
-
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"✅ *APK ready! Install prompt launched.*\n\n" +
-                    $"Version: `{requestedVersionStr}`\n\n" +
-                    "📲 Tap *Install* on the device to complete the update.\n" +
-                    "_The app restarts automatically after installation._");
-            }
-            catch (Exception ex)
-            {
-                try
-                {
-                    // Notify app UI → failure state
-                    MessagingCenter.Send<object, string>(
-                        this,
-                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
-                        ex.Message);
-
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"❌ *Unexpected update error:*\n`{ex.Message}`");
-                }
-                catch { }
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Update notification helpers
-        // ─────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Shows or updates the APK download progress notification.
-        /// Uses an indeterminate progress bar when progress = 0 (connecting).
-        /// Shows a static "done" icon when done = true.
-        /// </summary>
-        private void ShowUpdateProgressNotification(string message, int progress, bool done)
-        {
-            try
-            {
-                var builder = new NotificationCompat.Builder(_context, UPDATE_CHANNEL_ID)
-                    .SetContentTitle("Finder Update")
-                    .SetContentText(message)
-                    .SetSmallIcon(done
-                        ? Android.Resource.Drawable.StatSysDownloadDone
-                        : Android.Resource.Drawable.StatSysDownload)
-                    .SetOngoing(!done)   // Ongoing = cannot be dismissed while downloading
-                    .SetAutoCancel(done) // Auto-dismiss when tapped after completion
-                    .SetOnlyAlertOnce(true); // No repeated sound/vibration on each update
-
-                if (!done)
-                {
-                    // Indeterminate bar while connecting (progress == 0),
-                    // determinate bar once we have a file size
-                    builder.SetProgress(100, progress, progress == 0);
-                }
-
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.Notify(UPDATE_NOTIFICATION_ID, builder.Build());
-            }
-            catch { /* Silent fail — notification must never crash the download */ }
-        }
-
-        /// <summary>Dismisses the update progress notification immediately.</summary>
-        private void CancelUpdateNotification()
-        {
-            try
-            {
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.Cancel(UPDATE_NOTIFICATION_ID);
-            }
-            catch { }
-        }
-
-        /// <summary>
-        /// Creates the Android notification channel for update progress.
-        /// Required on API 26+ (Android 8.0+) — no-op on older versions.
-        /// Called once from the constructor.
-        /// </summary>
         private void CreateUpdateNotificationChannel()
         {
             if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
             try
             {
                 var channel = new NotificationChannel(
-                    UPDATE_CHANNEL_ID,
-                    "App Updates",
-                    NotificationImportance.Low) // Low = no sound, just a progress bar
-                {
-                    Description = "Shows APK download and install progress"
-                };
-
-                // No vibration for a progress bar — that would be annoying
+                    UPDATE_CHANNEL_ID, "App Updates", NotificationImportance.Low)
+                { Description = "Shows APK download and install progress" };
                 channel.EnableVibration(false);
-
                 var nm = (NotificationManager)_context
                     .GetSystemService(Context.NotificationService);
                 nm?.CreateNotificationChannel(channel);
@@ -1375,6 +1402,7 @@ namespace Finder.Droid.Managers
 
         public void OnProviderDisabled(string provider) { }
         public void OnProviderEnabled(string provider) { }
+
         public void OnStatusChanged(
             string provider,
             DroidLocation.Availability status,
