@@ -18,6 +18,7 @@ using Xamarin.Essentials;
 // ── Alias to avoid ambiguity with Android.Gms.Location.ILocationListener ──
 using DroidLocation = Android.Locations;
 using AndroidLocation = Android.Locations.Location;
+using Xamarin.Forms;
 
 namespace Finder.Droid.Managers
 {
@@ -1050,19 +1051,21 @@ namespace Finder.Droid.Managers
         /// <summary>
         /// Full handler for the /update [version] [url] command.
         ///
-        /// Flow:
-        ///   1. Validate the command parameters (version string + URL).
-        ///   2. Compare the requested version against the installed AssemblyVersion.
-        ///   3. If newer: download the APK with progress notifications.
-        ///   4. On success: trigger the Android package installer.
-        ///   5. At each step: send a Telegram status reply to the admin.
+        /// Sends MessagingCenter messages at each stage so MainPage.xaml
+        /// shows a live progress card inside the app UI.
+        ///
+        /// Message keys match MainViewModel constants:
+        ///   MSG_UPDATE_STARTED    → card appears, reset to 0%
+        ///   MSG_UPDATE_PROGRESS   → progress bar + percentage updated
+        ///   MSG_UPDATE_INSTALLING → "Ready to install!" stage
+        ///   MSG_UPDATE_COMPLETE   → "Done!" then auto-hide after 4s
+        ///   MSG_UPDATE_FAILED     → error message then auto-hide after 5s
         /// </summary>
         private async Task HandleUpdateCommandAsync(string param, AppSettings settings)
         {
             try
             {
                 // ── Cooldown guard ────────────────────────────────────────────
-                // Prevent rapid repeated /update commands during a download
                 if ((DateTime.Now - _lastUpdateCommand).TotalSeconds < UPDATE_COOLDOWN_S)
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
@@ -1077,16 +1080,13 @@ namespace Finder.Droid.Managers
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                         "❌ *Missing parameters.*\n\n" +
                         "Usage: `/update [version] [url]`\n\n" +
-                        "Examples:\n" +
-                        "`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`\n" +
-                        "`/update 1.0.2 https://www.dropbox.com/s/xxx/Finder.apk?dl=1`");
+                        "Example:\n" +
+                        "`/update 1.0.2 https://drive.google.com/uc?export=download&id=FILE_ID`");
                     return;
                 }
 
-                // Split into exactly 2 parts: version + url
-                // Use StringSplitOptions.None to preserve the URL even if it has spaces
-                string[] updateParts = param.Split(new[] { ' ' }, 2,
-                    StringSplitOptions.RemoveEmptyEntries);
+                string[] updateParts = param.Split(
+                    new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
 
                 if (updateParts.Length < 2 ||
                     string.IsNullOrWhiteSpace(updateParts[0]) ||
@@ -1113,13 +1113,11 @@ namespace Finder.Droid.Managers
                 }
 
                 // ── Version comparison ────────────────────────────────────────
-                // Read the version embedded in AssemblyInfo.cs at build time
                 var installedVersion = System.Reflection.Assembly
                     .GetExecutingAssembly()
                     .GetName()
                     .Version;
 
-                // Normalize both to Major.Minor.Build for comparison
                 var installed3 = new Version(
                     installedVersion.Major,
                     installedVersion.Minor,
@@ -1140,86 +1138,138 @@ namespace Finder.Droid.Managers
                     return;
                 }
 
-                // ── All checks passed — begin update process ──────────────────
+                // ── All checks passed — start update process ──────────────────
                 _lastUpdateCommand = DateTime.Now;
 
-                // Announce update to admin
+                string versionInfo =
+                    $"v{installed3.Major}.{installed3.Minor}.{installed3.Build}" +
+                    $" → v{requestedVersionStr}";
+
+                // ── Notify admin via Telegram ─────────────────────────────────
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                     $"📥 *Update queued!*\n\n" +
                     $"Installed: `{installed3.Major}.{installed3.Minor}.{installed3.Build}`\n" +
                     $"New:       `{requestedVersionStr}`\n\n" +
                     "⬇️ Downloading APK now…\n" +
-                    "_You will receive another message when it is ready to install._");
+                    "_Progress visible in the app UI._");
 
-                // Show Android progress notification on the device
+                // ── Notify app UI → show progress card at 0% ─────────────────
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_STARTED,
+                    versionInfo);
+
+                // ── Show Android notification (status bar) ────────────────────
                 ShowUpdateProgressNotification("Downloading Finder update…", 0, done: false);
 
                 // ── Download ──────────────────────────────────────────────────
                 var downloader = new Finder.Droid.Services.ApkDownloaderService(_context);
 
+                int lastNotifiedPct = -1;
+
                 string apkPath = await downloader.DownloadApkAsync(
                     apkUrl,
                     progress =>
                     {
-                        // Update the progress notification every % change
-                        ShowUpdateProgressNotification(
-                            $"Downloading Finder update… {progress}%",
-                            progress,
-                            done: false);
+                        // ── Update app UI progress card ───────────────────────
+                        MessagingCenter.Send<object, string>(
+                            this,
+                            Finder.ViewModels.MainViewModel.MSG_UPDATE_PROGRESS,
+                            progress.ToString());
+
+                        // ── Throttle notification updates to every 5% ─────────
+                        // Avoids flooding the notification manager
+                        if (progress >= lastNotifiedPct + 5 || progress == 100)
+                        {
+                            lastNotifiedPct = progress;
+                            ShowUpdateProgressNotification(
+                                $"Downloading Finder update… {progress}%",
+                                progress,
+                                done: false);
+                        }
                     });
 
                 // ── Download failed ───────────────────────────────────────────
                 if (string.IsNullOrEmpty(apkPath))
                 {
                     CancelUpdateNotification();
+
+                    string failReason = "Check URL and internet connection.";
+
+                    // Notify app UI → show error state on progress card
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        failReason);
+
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                         "❌ *Download failed.*\n\n" +
                         "Possible causes:\n" +
-                        "• The URL is incorrect or expired\n" +
-                        "• Google Drive link is not set to 'Anyone with link'\n" +
-                        "• The APK is too large and Google Drive requires manual confirm\n" +
-                        "• No internet connection on the device\n\n" +
-                        "Please check the URL and try again.");
+                        "• URL is incorrect or expired\n" +
+                        "• Google Drive link is not public\n" +
+                        "• No internet connection on device\n\n" +
+                        "Check the URL and try again.");
                     return;
                 }
 
-                // ── Download complete — check install permission ──────────────
+                // ── Download complete → install stage ─────────────────────────
                 ShowUpdateProgressNotification(
                     "Download complete! Tap to install.", 100, done: true);
 
-                // On API 26+: check if the user has enabled "Install unknown apps"
+                // Notify app UI → "Ready to install" stage
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_INSTALLING,
+                    versionInfo);
+
+                // ── Check install permission (Android 8.0+) ───────────────────
                 if (!Finder.Droid.Services.ApkInstaller.CanInstallPackages(_context))
                 {
-                    // Open the settings screen — the user must enable it manually
                     Finder.Droid.Services.ApkInstaller
                         .OpenInstallPermissionSettings(_context);
 
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        "Enable 'Install unknown apps' in Settings, then retry.");
+
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                         "⚠️ *Permission required.*\n\n" +
-                        "The device needs 'Install unknown apps' enabled for Finder.\n\n" +
-                        "A settings screen has been opened on the device.\n" +
-                        "Enable it, then send `/update` again to retry.");
+                        "'Install unknown apps' must be enabled for Finder.\n\n" +
+                        "A settings screen has opened on the device.\n" +
+                        "Enable it, then send `/update` again.");
                     return;
                 }
 
-                // ── Trigger install ───────────────────────────────────────────
+                // ── Trigger system installer ──────────────────────────────────
                 Finder.Droid.Services.ApkInstaller.Install(_context, apkPath);
+
+                // Notify app UI → complete state (auto-hides after 4 seconds)
+                MessagingCenter.Send<object, string>(
+                    this,
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_COMPLETE,
+                    $"Tap Install on the device to finish — {versionInfo}");
 
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                     $"✅ *APK ready! Install prompt launched.*\n\n" +
                     $"Version: `{requestedVersionStr}`\n\n" +
                     "📲 Tap *Install* on the device to complete the update.\n" +
-                    "_The app will restart automatically after installation._");
+                    "_The app restarts automatically after installation._");
             }
             catch (Exception ex)
             {
-                // Catch-all — never let an update error crash the polling loop
                 try
                 {
+                    // Notify app UI → failure state
+                    MessagingCenter.Send<object, string>(
+                        this,
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        ex.Message);
+
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
                         $"❌ *Unexpected update error:*\n`{ex.Message}`");
                 }
-                catch { /* Silent fail — Telegram may be unreachable */ }
+                catch { }
             }
         }
 

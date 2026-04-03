@@ -24,11 +24,91 @@
                            FontAttributes="Bold"
                            HorizontalOptions="Center" />
 
-                    <!-- Last update time -->
                     <Label Text="{Binding LastUpdateText}"
                            TextColor="{StaticResource TextLightColor}"
                            FontSize="12"
                            HorizontalOptions="Center" />
+                </StackLayout>
+            </Frame>
+
+            <!-- ══════════════════════════════════════════════════════════
+                 ── Update Progress Card ─────────────────────────────────
+                 Visible ONLY when a /update command is being processed.
+                 Hidden at all other times (IsVisible bound to IsUpdating).
+                 ══════════════════════════════════════════════════════════ -->
+            <Frame Style="{StaticResource CardFrameStyle}"
+                   Margin="0,0,0,12"
+                   IsVisible="{Binding IsUpdating}"
+                   BackgroundColor="#E3F2FD">
+
+                <StackLayout Spacing="10">
+
+                    <!-- Card header row: icon + title + animated spinner -->
+                    <StackLayout Orientation="Horizontal" Spacing="10">
+
+                        <Label Text="⬇️"
+                               FontSize="22"
+                               VerticalOptions="Center" />
+
+                        <Label Text="APP UPDATE"
+                               Style="{StaticResource SectionLabelStyle}"
+                               TextColor="{StaticResource PrimaryDarkColor}"
+                               VerticalOptions="Center"
+                               HorizontalOptions="FillAndExpand" />
+
+                        <!-- Spinner visible while downloading (progress < 100) -->
+                        <ActivityIndicator
+                            IsRunning="{Binding IsDownloading}"
+                            IsVisible="{Binding IsDownloading}"
+                            Color="{StaticResource PrimaryColor}"
+                            WidthRequest="24"
+                            HeightRequest="24"
+                            VerticalOptions="Center" />
+                    </StackLayout>
+
+                    <!-- Status text: "Downloading… 45%" / "Installing…" / etc. -->
+                    <Label Text="{Binding UpdateStatusText}"
+                           FontSize="14"
+                           FontAttributes="Bold"
+                           TextColor="{StaticResource TextPrimaryColor}"
+                           HorizontalOptions="Center" />
+
+                    <!-- Progress bar — fills left to right as download advances -->
+                    <ProgressBar
+                        Progress="{Binding UpdateProgressFraction}"
+                        ProgressColor="{StaticResource PrimaryColor}"
+                        BackgroundColor="{StaticResource DividerColor}"
+                        HeightRequest="8" />
+
+                    <!-- Percentage label row -->
+                    <StackLayout Orientation="Horizontal">
+
+                        <Label Text="0%"
+                               FontSize="11"
+                               TextColor="{StaticResource TextLightColor}"
+                               HorizontalOptions="StartAndExpand" />
+
+                        <!-- Centre percentage changes as download progresses -->
+                        <Label Text="{Binding UpdateProgressPercent,
+                                       StringFormat='{0}%'}"
+                               FontSize="13"
+                               FontAttributes="Bold"
+                               TextColor="{StaticResource PrimaryColor}"
+                               HorizontalOptions="Center" />
+
+                        <Label Text="100%"
+                               FontSize="11"
+                               TextColor="{StaticResource TextLightColor}"
+                               HorizontalOptions="EndAndExpand" />
+                    </StackLayout>
+
+                    <!-- Sub-status line: size downloaded / speed / stage -->
+                    <Label Text="{Binding UpdateSubStatusText}"
+                           FontSize="12"
+                           TextColor="{StaticResource TextSecondaryColor}"
+                           HorizontalOptions="Center"
+                           HorizontalTextAlignment="Center" />
+
                 </StackLayout>
             </Frame>
 
@@ -40,29 +120,16 @@
                            Style="{StaticResource SectionLabelStyle}"
                            Margin="0,0,0,6" />
 
-                    <!--
-                        FIX: Removed IsEnabled="{Binding IsServiceRunning, Converter=...}"
-                        from Start button. Command.CanExecute is the ONLY mechanism
-                        controlling IsEnabled. Having both caused Xamarin.Forms to
-                        let CanExecuteChanged override the binding, permanently
-                        disabling the Stop button when IsBusy was briefly true.
-                    -->
                     <Button x:Name="btnStart"
                             Text="▶  Start Tracking"
                             Style="{StaticResource SuccessButtonStyle}"
                             Command="{Binding StartServiceCommand}" />
 
-                    <!--
-                        FIX: Removed IsEnabled="{Binding IsServiceRunning}" from
-                        Stop button. IsEnabled is now controlled exclusively by
-                        StopServiceCommand.CanExecute = () => IsServiceRunning.
-                    -->
                     <Button x:Name="btnStop"
                             Text="■  Stop Tracking"
                             Style="{StaticResource DangerButtonStyle}"
                             Command="{Binding StopServiceCommand}" />
 
-                    <!-- Refresh status -->
                     <Button Text="↻  Refresh Status"
                             Style="{StaticResource PrimaryButtonStyle}"
                             BackgroundColor="{StaticResource PrimaryLightColor}"
@@ -79,12 +146,10 @@
                            Style="{StaticResource SectionLabelStyle}"
                            Margin="0,0,0,6" />
 
-                    <!-- Share location button -->
                     <Button Text="📤  Share Current Location"
                             Style="{StaticResource PrimaryButtonStyle}"
                             Command="{Binding ShareLocationCommand}" />
 
-                    <!-- View history button -->
                     <Button Text="📅  Location History"
                             Style="{StaticResource PrimaryButtonStyle}"
                             BackgroundColor="{StaticResource TextSecondaryColor}"
@@ -93,7 +158,7 @@
                 </StackLayout>
             </Frame>
 
-            <!-- ── Activity indicator ────────────────────────────────── -->
+            <!-- ── Activity indicator (general busy state) ───────────── -->
             <ActivityIndicator IsRunning="{Binding IsBusy}"
                                IsVisible="{Binding IsBusy}"
                                Color="{StaticResource PrimaryColor}"

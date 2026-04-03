@@ -42,9 +42,11 @@ namespace Finder.Views
         {
             base.OnDisappearing();
 
-            // Stop polling as soon as the page is not visible —
-            // no battery wasted when the user is on another screen.
             _viewModel.StopStatusPolling();
+
+            // ── ADD THIS LINE ──────────────────────────────────────────────────
+            // Unsubscribe update messages to prevent memory leaks when page hides
+            _viewModel.UnsubscribeUpdateMessages();
 
             _viewModel.RequestOpenSettings -= OnRequestOpenSettings;
             _viewModel.RequestViewHistory -= OnRequestViewHistory;
