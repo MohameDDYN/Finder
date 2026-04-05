@@ -6,6 +6,7 @@ using Android.OS;
 using Android.Preferences;
 using Android.Runtime;
 using Finder.Droid.Managers;
+using Finder.Droid.Services;
 using Finder.ViewModels;
 using Xamarin.Forms;
 
@@ -28,6 +29,14 @@ namespace Finder.Droid
         private const int RC_BACKGROUND = 101;
         private const int RC_BIOMETRIC = 102;
 
+        // ── Tracks whether this resume cycle should check for a pending update ──
+        // Set to true every time OnResume fires so we only attempt once per return.
+        private bool _checkPendingUpdateOnResume = false;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Lifecycle
+        // ─────────────────────────────────────────────────────────────────────
+
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
@@ -41,6 +50,48 @@ namespace Finder.Droid
             SubscribeToServiceStateMessages();
             RequestLocationPermissions();
         }
+
+        protected override void OnResume()
+        {
+            base.OnResume();
+
+            // ── Telegram command handler ──────────────────────────────────────
+            if (IsServiceRunning())
+                StopAppHandler();
+            else
+                StartAppHandlerIfNeeded();
+
+            // ── Auto-resume pending update ────────────────────────────────────
+            // Fires every time the user returns to the app from ANY screen
+            // (including the "Install Unknown Apps" settings screen).
+            // TelegramCommandHandler.ResumePendingUpdateAsync is a no-op when
+            // there is no stored pending update, so this is always safe to call.
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await TelegramCommandHandler.ResumePendingUpdateAsync(this);
+                }
+                catch { /* Silent fail — update can be retried manually */ }
+            });
+        }
+
+        protected override void OnPause()
+        {
+            base.OnPause();
+            StopAppHandler();
+        }
+
+        protected override void OnDestroy()
+        {
+            StopAppHandler();
+            UnsubscribeFromServiceStateMessages();
+            base.OnDestroy();
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // App-side command handler management
+        // ─────────────────────────────────────────────────────────────────────
 
         private void StartAppHandlerIfNeeded()
         {
@@ -58,6 +109,10 @@ namespace Finder.Droid
             var prefs = PreferenceManager.GetDefaultSharedPreferences(this);
             return prefs.GetBoolean("is_tracking_service_running", false);
         }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // MessagingCenter subscriptions — keep handler and service in sync
+        // ─────────────────────────────────────────────────────────────────────
 
         private void SubscribeToServiceStateMessages()
         {
@@ -78,143 +133,57 @@ namespace Finder.Droid
             MessagingCenter.Unsubscribe<MainViewModel>(this, "ServiceStopped");
         }
 
-        protected override void OnResume()
-        {
-            base.OnResume();
-
-            if (IsServiceRunning())
-                StopAppHandler();
-            else
-                StartAppHandlerIfNeeded();
-        }
-
-        protected override void OnPause()
-        {
-            base.OnPause();
-            StopAppHandler();
-        }
-
-        protected override void OnDestroy()
-        {
-            StopAppHandler();
-            UnsubscribeFromServiceStateMessages();
-            base.OnDestroy();
-        }
+        // ─────────────────────────────────────────────────────────────────────
+        // Runtime permission requests
+        // ─────────────────────────────────────────────────────────────────────
 
         private void RequestLocationPermissions()
         {
-            bool fineGranted = CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation)
-                                 == Permission.Granted;
-            bool coarseGranted = CheckSelfPermission(Android.Manifest.Permission.AccessCoarseLocation)
-                                 == Permission.Granted;
+            bool fineGranted = CheckSelfPermission(
+                Android.Manifest.Permission.AccessFineLocation) == Permission.Granted;
+            bool coarseGranted = CheckSelfPermission(
+                Android.Manifest.Permission.AccessCoarseLocation) == Permission.Granted;
 
             if (!fineGranted || !coarseGranted)
+            {
                 RequestPermissions(new[]
                 {
                     Android.Manifest.Permission.AccessFineLocation,
                     Android.Manifest.Permission.AccessCoarseLocation
                 }, RC_LOCATION);
-            else
-                RequestBackgroundLocationPermission();
-        }
-
-        private void RequestBackgroundLocationPermission()
-        {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.Q)
-            {
-                RequestBiometricPermission();
-                return;
-            }
-
-            bool granted = CheckSelfPermission(Android.Manifest.Permission.AccessBackgroundLocation)
-                           == Permission.Granted;
-
-            if (!granted)
-                RequestPermissions(
-                    new[] { Android.Manifest.Permission.AccessBackgroundLocation },
-                    RC_BACKGROUND);
-            else
-                RequestBiometricPermission();
-        }
-
-        private void RequestBiometricPermission()
-        {
-            if (Build.VERSION.SdkInt >= BuildVersionCodes.P)
-            {
-                const string useBiometric = "android.permission.USE_BIOMETRIC";
-                if (CheckSelfPermission(useBiometric) != Permission.Granted)
-                    RequestPermissions(new[] { useBiometric }, RC_BIOMETRIC);
             }
             else
             {
-                if (CheckSelfPermission(Android.Manifest.Permission.UseFingerprint)
-                    != Permission.Granted)
-                    RequestPermissions(
-                        new[] { Android.Manifest.Permission.UseFingerprint },
-                        RC_BIOMETRIC);
+                RequestBackgroundLocationIfNeeded();
+            }
+        }
+
+        private void RequestBackgroundLocationIfNeeded()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.Q) return;
+
+            bool bgGranted = CheckSelfPermission(
+                Android.Manifest.Permission.AccessBackgroundLocation) == Permission.Granted;
+
+            if (!bgGranted)
+            {
+                RequestPermissions(new[]
+                {
+                    Android.Manifest.Permission.AccessBackgroundLocation
+                }, RC_BACKGROUND);
             }
         }
 
         public override void OnRequestPermissionsResult(
-            int requestCode,
-            string[] permissions,
-            [GeneratedEnum] Permission[] grantResults)
+            int requestCode, string[] permissions, [GeneratedEnum] Permission[] grantResults)
         {
             Xamarin.Essentials.Platform.OnRequestPermissionsResult(
                 requestCode, permissions, grantResults);
+
             base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
 
-            switch (requestCode)
-            {
-                case RC_LOCATION:
-                    bool fineGranted = grantResults.Length > 0
-                                       && grantResults[0] == Permission.Granted;
-                    if (fineGranted)
-                        RequestBackgroundLocationPermission();
-                    else
-                        ShowLocationRationaleDialog();
-                    break;
-
-                case RC_BACKGROUND:
-                    RequestBiometricPermission();
-                    break;
-
-                case RC_BIOMETRIC:
-                    break;
-            }
-        }
-
-        private void ShowLocationRationaleDialog()
-        {
-            new AlertDialog.Builder(this)
-                .SetTitle("Location Permission Required")
-                .SetMessage(
-                    "Finder needs Location permission to track and share your " +
-                    "position via Telegram.\n\n" +
-                    "Without this permission the tracking service cannot start.")
-                .SetPositiveButton("Grant", (s, e) =>
-                {
-                    RequestPermissions(new[]
-                    {
-                        Android.Manifest.Permission.AccessFineLocation,
-                        Android.Manifest.Permission.AccessCoarseLocation
-                    }, RC_LOCATION);
-                })
-                .SetNegativeButton("Open Settings", (s, e) => OpenAppSettings())
-                .SetCancelable(false)
-                .Show();
-        }
-
-        private void OpenAppSettings()
-        {
-            try
-            {
-                var intent = new Intent(
-                    Android.Provider.Settings.ActionApplicationDetailsSettings);
-                intent.SetData(Android.Net.Uri.Parse($"package:{PackageName}"));
-                StartActivity(intent);
-            }
-            catch { }
+            if (requestCode == RC_LOCATION)
+                RequestBackgroundLocationIfNeeded();
         }
     }
 }

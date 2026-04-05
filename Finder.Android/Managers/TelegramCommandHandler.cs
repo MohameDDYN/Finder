@@ -44,6 +44,12 @@ namespace Finder.Droid.Managers
         private const string PREF_POLL_INTERVAL_MS = "telegram_poll_interval_ms";
         private const string PREF_POLLING_ENABLED = "telegram_polling_enabled";
 
+        // ── Pending update — stored when "Install Unknown Apps" permission is
+        //    missing at /update time so OnResume can auto-resume the download
+        //    as soon as the user returns from the settings screen. ─────────────
+        private const string PREF_PENDING_UPDATE_VERSION = "pending_update_version";
+        private const string PREF_PENDING_UPDATE_URL = "pending_update_url";
+
         // ── Notification channels ─────────────────────────────────────────────
         private const string GPS_ALERT_CHANNEL_ID = "finder_gps_alert_channel";
         private const int GPS_ALERT_NOTIFICATION_ID = 2001;
@@ -112,9 +118,7 @@ namespace Finder.Droid.Managers
             try
             {
                 var channel = new NotificationChannel(
-                    GPS_ALERT_CHANNEL_ID,
-                    "GPS Alerts",
-                    NotificationImportance.High);
+                    GPS_ALERT_CHANNEL_ID, "GPS Alerts", NotificationImportance.High);
                 var nm = (NotificationManager)_context
                     .GetSystemService(Context.NotificationService);
                 nm?.CreateNotificationChannel(channel);
@@ -128,9 +132,7 @@ namespace Finder.Droid.Managers
             try
             {
                 var channel = new NotificationChannel(
-                    UPDATE_CHANNEL_ID,
-                    "App Updates",
-                    NotificationImportance.High);
+                    UPDATE_CHANNEL_ID, "App Updates", NotificationImportance.High);
                 var nm = (NotificationManager)_context
                     .GetSystemService(Context.NotificationService);
                 nm?.CreateNotificationChannel(channel);
@@ -202,19 +204,21 @@ namespace Finder.Droid.Managers
                         {
                             case "fused":
                                 BroadcastGpsProvider("fused");
-                                response = "🔋 *GPS provider → Fused (default)*\n\n" +
-                                           "Uses GPS + WiFi + cell towers.\n" +
-                                           "The OS manages chip power — battery-efficient.\n\n" +
-                                           "✅ Switch applied immediately.\n" +
-                                           "ℹ️ /location always uses raw GPS regardless.";
+                                response =
+                                    "🔋 *GPS provider → Fused (default)*\n\n" +
+                                    "Uses GPS + WiFi + cell towers.\n" +
+                                    "The OS manages chip power — battery-efficient.\n\n" +
+                                    "✅ Switch applied immediately.\n" +
+                                    "ℹ️ /location always uses raw GPS regardless.";
                                 break;
                             case "raw":
                                 BroadcastGpsProvider("raw");
-                                response = "🛰 *GPS provider → Raw GPS*\n\n" +
-                                           "Uses the hardware GPS chip directly.\n" +
-                                           "Higher accuracy but *higher battery drain*.\n\n" +
-                                           "✅ Switch applied immediately.\n" +
-                                           "💡 Send /gpsprovider fused to revert.";
+                                response =
+                                    "🛰 *GPS provider → Raw GPS*\n\n" +
+                                    "Uses the hardware GPS chip directly.\n" +
+                                    "Higher accuracy but *higher battery drain*.\n\n" +
+                                    "✅ Switch applied immediately.\n" +
+                                    "💡 Send /gpsprovider fused to revert.";
                                 break;
                             default:
                                 string cur = GetActiveGpsProvider();
@@ -228,7 +232,7 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /interval ────────────────────────────────────────────
+                    // ── /interval [ms] ────────────────────────────────────────
                     case "/interval":
                         if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
                         {
@@ -263,8 +267,9 @@ namespace Finder.Droid.Managers
                             case "off":
                                 SetPollingEnabled(false);
                                 Stop();
-                                response = "⏸ *Polling disabled* — zero network calls.\n" +
-                                           "⚠️ Re-enable from the app or restart tracking.";
+                                response =
+                                    "⏸ *Polling disabled* — zero network calls.\n" +
+                                    "⚠️ Re-enable from the app or restart tracking.";
                                 break;
                             case "on":
                                 SetPollingEnabled(true);
@@ -274,8 +279,9 @@ namespace Finder.Droid.Managers
                                 break;
                             default:
                                 bool en = IsPollingEnabled();
-                                response = $"📡 Polling: *{(en ? "ON ✅" : "OFF ⏸")}*\n" +
-                                           "/polling on|off";
+                                response =
+                                    $"📡 Polling: *{(en ? "ON ✅" : "OFF ⏸")}*\n" +
+                                    "/polling on|off";
                                 break;
                         }
                         break;
@@ -292,8 +298,7 @@ namespace Finder.Droid.Managers
                                     .GetDefaultSharedPreferences(_context).Edit();
                                 ed.PutInt(PREF_POLL_INTERVAL_MS, pollMs);
                                 ed.Apply();
-                                response =
-                                    $"💾 Saved {pollSec}s — applies when /polling on.";
+                                response = $"💾 Saved {pollSec}s — applies when /polling on.";
                             }
                             else
                             {
@@ -304,8 +309,9 @@ namespace Finder.Droid.Managers
                         else
                         {
                             int cur = GetSavedPollIntervalMs();
-                            response = $"📡 Poll interval: *{cur / 1000}s*\n" +
-                                       "/pollinterval [sec] (min 10)";
+                            response =
+                                $"📡 Poll interval: *{cur / 1000}s*\n" +
+                                "/pollinterval [sec] (min 10)";
                         }
                         break;
 
@@ -317,7 +323,8 @@ namespace Finder.Droid.Managers
                             Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
                         string activeProvider = GetActiveGpsProvider();
                         string providerLabel = activeProvider == "raw"
-                            ? "🛰 Raw GPS" : "🔋 Fused";
+                            ? "🛰 Raw GPS"
+                            : "🔋 Fused";
                         int pollSecs = GetSavedPollIntervalMs() / 1000;
                         var statusFiles = _geoJsonManager.GetAvailableDataFiles();
 
@@ -328,7 +335,6 @@ namespace Finder.Droid.Managers
                             $"{statusVersion.Major}.{statusVersion.Minor}" +
                             $".{statusVersion.Build}";
 
-                        // Include battery in status for convenience
                         int statusBattery = GetBatteryLevel();
                         string batteryStr = statusBattery >= 0
                             ? $"{statusBattery}%" : "Unknown";
@@ -390,7 +396,7 @@ namespace Finder.Droid.Managers
                         response = "🔄 Service restarted";
                         break;
 
-                    // ── /token ───────────────────────────────────────────────
+                    // ── /token [token] ────────────────────────────────────────
                     case "/token":
                         if (!string.IsNullOrEmpty(param))
                         {
@@ -401,7 +407,7 @@ namespace Finder.Droid.Managers
                         else { response = "❌ Usage: /token [your_bot_token]"; }
                         break;
 
-                    // ── /chatid ──────────────────────────────────────────────
+                    // ── /chatid [id] ──────────────────────────────────────────
                     case "/chatid":
                         if (!string.IsNullOrEmpty(param))
                         {
@@ -412,20 +418,20 @@ namespace Finder.Droid.Managers
                         else { response = "❌ Usage: /chatid [your_chat_id]"; }
                         break;
 
-                    // ── /today ───────────────────────────────────────────────
+                    // ── /today ────────────────────────────────────────────────
                     case "/today":
                         await HandleGeoJsonReportAsync(currentSettings, DateTime.Today);
                         response = null;
                         break;
 
-                    // ── /yesterday ───────────────────────────────────────────
+                    // ── /yesterday ────────────────────────────────────────────
                     case "/yesterday":
                         await HandleGeoJsonReportAsync(
                             currentSettings, DateTime.Today.AddDays(-1));
                         response = null;
                         break;
 
-                    // ── /report YYYY-MM-DD ────────────────────────────────────
+                    // ── /report YYYY-MM-DD ─────────────────────────────────────
                     case "/report":
                         if (!string.IsNullOrEmpty(param) &&
                             DateTime.TryParseExact(param, "yyyy-MM-dd",
@@ -438,7 +444,7 @@ namespace Finder.Droid.Managers
                         else { response = "❌ Usage: /report YYYY-MM-DD"; }
                         break;
 
-                    // ── /files ───────────────────────────────────────────────
+                    // ── /files ────────────────────────────────────────────────
                     case "/files":
                         var files = _geoJsonManager.GetAvailableDataFiles();
                         response = files.Count == 0
@@ -458,7 +464,7 @@ namespace Finder.Droid.Managers
                             $"🧹 Removed {before - after} files older than {keepDays} days.";
                         break;
 
-                    // ── /gpsstatus ───────────────────────────────────────────
+                    // ── /gpsstatus ────────────────────────────────────────────
                     case "/gpsstatus":
                         bool gpsOn = IsGpsEnabled();
                         bool svcActive = IsServiceRunning();
@@ -477,19 +483,21 @@ namespace Finder.Droid.Managers
                                 "\n\n💡 /enablelocation to request GPS activation.";
                         break;
 
-                    // ── /enablelocation ──────────────────────────────────────
+                    // ── /enablelocation ───────────────────────────────────────
                     case "/enablelocation":
                         ShowEnableLocationNotification();
-                        response = "📲 Notification sent — tap it on the device to open Location Settings.";
+                        response =
+                            "📲 Notification sent — tap it on the device to open " +
+                            "Location Settings.";
                         break;
 
-                    // ── /location ────────────────────────────────────────────
+                    // ── /location ─────────────────────────────────────────────
                     case "/location":
                         await HandleLocationCommandAsync(currentSettings);
                         response = null;
                         break;
 
-                    // ── /pauselocation ───────────────────────────────────────
+                    // ── /pauselocation ────────────────────────────────────────
                     case "/pauselocation":
                         if (IsTelegramSendingPaused())
                         {
@@ -502,7 +510,7 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /resumelocation ──────────────────────────────────────
+                    // ── /resumelocation ───────────────────────────────────────
                     case "/resumelocation":
                         if (!IsTelegramSendingPaused())
                         {
@@ -535,9 +543,10 @@ namespace Finder.Droid.Managers
                         }
                         break;
 
-                    // ── /version ─────────────────────────────────────────────
+                    // ── /version ──────────────────────────────────────────────
                     case "/version":
-                        var runningAssembly = System.Reflection.Assembly.GetExecutingAssembly();
+                        var runningAssembly = System.Reflection.Assembly
+                            .GetExecutingAssembly();
                         var runningVersion = runningAssembly.GetName().Version;
                         response =
                             $"📦 *Finder — Installed Version*\n\n" +
@@ -566,41 +575,31 @@ namespace Finder.Droid.Managers
                     // ═════════════════════════════════════════════════════════
 
                     // ── /battery ─────────────────────────────────────────────
-                    // Detailed battery status: level, charging state, plug type,
-                    // temperature, voltage and health — all from BatteryManager.
                     case "/battery":
                         response = GetBatteryReport();
                         break;
 
                     // ── /charging ────────────────────────────────────────────
-                    // Focused view on charging state and power source only.
                     case "/charging":
                         response = GetChargingReport();
                         break;
 
                     // ── /temperature ─────────────────────────────────────────
-                    // Battery temperature plus a plain-language health label.
                     case "/temperature":
                         response = GetTemperatureReport();
                         break;
 
                     // ── /storage ─────────────────────────────────────────────
-                    // Internal storage: total, used, free — as a progress bar
-                    // so the fill level is instantly readable in chat.
                     case "/storage":
                         response = GetStorageReport();
                         break;
 
                     // ── /memory ──────────────────────────────────────────────
-                    // RAM: total, available, used, and the low-memory flag
-                    // raised by Android when memory is critically constrained.
                     case "/memory":
                         response = GetMemoryReport();
                         break;
 
                     // ── /uptime ──────────────────────────────────────────────
-                    // Time elapsed since the last device reboot, computed from
-                    // SystemClock.ElapsedRealtime() — no permissions required.
                     case "/uptime":
                         response = GetUptimeReport();
                         break;
@@ -669,7 +668,6 @@ namespace Finder.Droid.Managers
                 {
                     var lm = (DroidLocation.LocationManager)_context
                         .GetSystemService(Context.LocationService);
-
                     rawLocation = lm?.GetLastKnownLocation(
                         DroidLocation.LocationManager.GpsProvider);
                 }
@@ -677,20 +675,19 @@ namespace Finder.Droid.Managers
 
                 // Step 2: if no cached fix, request a fresh one (times out in 30s)
                 if (rawLocation == null)
-                {
                     rawLocation = await RequestFreshGpsFixAsync();
-                }
 
                 if (rawLocation == null)
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ Could not get a GPS fix. Make sure GPS is enabled and the " +
-                        "device has sky visibility.");
+                        "❌ Could not get a GPS fix. Make sure GPS is enabled and " +
+                        "the device has sky visibility.");
                     return;
                 }
 
                 string mapsUrl =
-                    $"https://www.google.com/maps?q={rawLocation.Latitude},{rawLocation.Longitude}";
+                    $"https://www.google.com/maps?q=" +
+                    $"{rawLocation.Latitude},{rawLocation.Longitude}";
 
                 int bat = GetBatteryLevel();
                 string batStr = bat >= 0 ? $"{bat}%" : "unknown";
@@ -722,7 +719,6 @@ namespace Finder.Droid.Managers
         {
             var tcs = new TaskCompletionSource<AndroidLocation>();
             var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-
             cts.Token.Register(() => tcs.TrySetResult(null));
 
             try
@@ -752,8 +748,7 @@ namespace Finder.Droid.Managers
         // /update handler
         // ─────────────────────────────────────────────────────────────────────
 
-        private async Task HandleUpdateCommandAsync(
-            string param, AppSettings settings)
+        private async Task HandleUpdateCommandAsync(string param, AppSettings settings)
         {
             try
             {
@@ -806,7 +801,8 @@ namespace Finder.Droid.Managers
                 }
 
                 string installedStr =
-                    $"{installedVersion.Major}.{installedVersion.Minor}.{installedVersion.Build}";
+                    $"{installedVersion.Major}.{installedVersion.Minor}" +
+                    $".{installedVersion.Build}";
 
                 if (requestedVersion <= installedVersion)
                 {
@@ -815,6 +811,44 @@ namespace Finder.Droid.Managers
                         $"≥ requested (`{requestedVersionStr}`). No update needed.");
                     return;
                 }
+
+                // ── Step 0: Install-unknown-apps permission check ─────────────
+                // API 26+: per-app toggle the user must enable once.
+                // API 21-25: REQUEST_INSTALL_PACKAGES manifest entry is enough —
+                //   CanInstallPackages() always returns true on those versions.
+                //
+                // If the permission is missing we store the pending update in
+                // SharedPreferences, open the settings screen, and abort here.
+                // MainActivity.OnResume will call ResumePendingUpdateAsync()
+                // when the user returns — no need to send /update again.
+                if (!ApkInstaller.CanInstallPackages(_context))
+                {
+                    // Persist version + URL so the auto-resume can pick them up
+                    var pendingEd = PreferenceManager
+                        .GetDefaultSharedPreferences(_context).Edit();
+                    pendingEd.PutString(PREF_PENDING_UPDATE_VERSION, requestedVersionStr);
+                    pendingEd.PutString(PREF_PENDING_UPDATE_URL, downloadUrl);
+                    pendingEd.Apply();
+
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        "⚠️ *Permission Required: Install Unknown Apps*\n\n" +
+                        "Finder does not have permission to install APKs from " +
+                        "unknown sources on this device.\n\n" +
+                        "📲 Opening *Install Unknown Apps* settings on the " +
+                        "device now…\n\n" +
+                        "👉 Find *Finder* and toggle it *ON*.\n\n" +
+                        "✅ The update will then *start automatically* — " +
+                        "no need to send `/update` again.");
+
+                    // Opens Settings → Special App Access → Install Unknown Apps → Finder
+                    // No-op on API 21-25 (global setting there).
+                    ApkInstaller.OpenInstallPermissionSettings(_context);
+                    return; // Abort — OnResume will auto-resume the download.
+                }
+
+                // Permission is granted — clear any stale pending update entry.
+                ClearPendingUpdate();
+                // ─────────────────────────────────────────────────────────────
 
                 _lastUpdateCommand = DateTime.Now;
 
@@ -916,12 +950,11 @@ namespace Finder.Droid.Managers
 
         // ═════════════════════════════════════════════════════════════════════
         // 🔋 DEVICE HEALTH — report builders
-        // Each method reads live Android APIs and returns a formatted string.
         // ═════════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// /battery — full battery snapshot.
-        /// Reads: level, status, plug type, temperature, voltage, health.
+        /// /battery — full battery snapshot: level, status, plug type,
+        /// temperature, voltage, health.
         /// No extra permissions required (BatteryManager sticky broadcast).
         /// </summary>
         private string GetBatteryReport()
@@ -934,43 +967,29 @@ namespace Finder.Droid.Managers
                 if (battery == null)
                     return "❌ Could not read battery information.";
 
-                // ── Level ──────────────────────────────────────────────────────
                 int level = battery.GetIntExtra(BatteryManager.ExtraLevel, -1);
                 int scale = battery.GetIntExtra(BatteryManager.ExtraScale, 100);
                 int pct = scale > 0 ? (int)(level * 100f / scale) : -1;
-
-                // ── Status (charging / discharging / full / etc.) ──────────────
                 int statusCode = battery.GetIntExtra(BatteryManager.ExtraStatus, -1);
-                string status = BatteryStatusLabel(statusCode);
-
-                // ── Plug type (AC / USB / Wireless / Unplugged) ────────────────
-                int pluggedCode = battery.GetIntExtra(BatteryManager.ExtraPlugged, -1);
-                string plugged = PluggedLabel(pluggedCode);
-
-                // ── Temperature (tenths of °C → °C) ───────────────────────────
+                int plugCode = battery.GetIntExtra(BatteryManager.ExtraPlugged, -1);
                 int tempRaw = battery.GetIntExtra(BatteryManager.ExtraTemperature, -1);
+                int voltMv = battery.GetIntExtra(BatteryManager.ExtraVoltage, -1);
+                int healthCode = battery.GetIntExtra(BatteryManager.ExtraHealth, -1);
+
                 float tempC = tempRaw / 10f;
                 string tempStr = tempRaw >= 0 ? $"{tempC:F1} °C" : "Unknown";
-
-                // ── Voltage (mV) ──────────────────────────────────────────────
-                int voltMv = battery.GetIntExtra(BatteryManager.ExtraVoltage, -1);
                 string volt = voltMv > 0 ? $"{voltMv} mV" : "Unknown";
 
-                // ── Health ────────────────────────────────────────────────────
-                int healthCode = battery.GetIntExtra(BatteryManager.ExtraHealth, -1);
-                string health = BatteryHealthLabel(healthCode);
-
-                // ── Emoji indicator for level ─────────────────────────────────
                 string levelEmoji = BatteryEmoji(pct, statusCode);
 
                 return
                     $"🔋 *Battery*\n\n" +
                     $"{levelEmoji} Level:       {(pct >= 0 ? $"{pct}%" : "Unknown")}\n" +
-                    $"⚡ Status:      {status}\n" +
-                    $"🔌 Plugged:     {plugged}\n" +
+                    $"⚡ Status:      {BatteryStatusLabel(statusCode)}\n" +
+                    $"🔌 Plugged:     {PluggedLabel(plugCode)}\n" +
                     $"🌡 Temperature: {tempStr}\n" +
                     $"⚡ Voltage:     {volt}\n" +
-                    $"❤️ Health:      {health}\n" +
+                    $"❤️ Health:      {BatteryHealthLabel(healthCode)}\n" +
                     $"🕐 Time:        {DateTime.Now:HH:mm:ss}";
             }
             catch (Exception ex)
@@ -980,8 +999,7 @@ namespace Finder.Droid.Managers
         }
 
         /// <summary>
-        /// /charging — focused view on power source and charging state only.
-        /// Ideal for a quick "is the phone charging?" check.
+        /// /charging — focused view on charging state and power source only.
         /// </summary>
         private string GetChargingReport()
         {
@@ -999,10 +1017,6 @@ namespace Finder.Droid.Managers
                 int statusCode = battery.GetIntExtra(BatteryManager.ExtraStatus, -1);
                 int plugCode = battery.GetIntExtra(BatteryManager.ExtraPlugged, -1);
 
-                string status = BatteryStatusLabel(statusCode);
-                string plugged = PluggedLabel(plugCode);
-
-                // Determine if actually charging
                 bool isCharging =
                     statusCode == (int)BatteryStatus.Charging ||
                     statusCode == (int)BatteryStatus.Full;
@@ -1011,8 +1025,8 @@ namespace Finder.Droid.Managers
 
                 return
                     $"{header}\n\n" +
-                    $"Status:  {status}\n" +
-                    $"Source:  {plugged}\n" +
+                    $"Status:  {BatteryStatusLabel(statusCode)}\n" +
+                    $"Source:  {PluggedLabel(plugCode)}\n" +
                     $"Level:   {(pct >= 0 ? $"{pct}%" : "Unknown")}\n" +
                     $"Time:    {DateTime.Now:HH:mm:ss}";
             }
@@ -1038,43 +1052,18 @@ namespace Finder.Droid.Managers
 
                 int tempRaw = battery.GetIntExtra(BatteryManager.ExtraTemperature, -1);
                 float tempC = tempRaw / 10f;
-                float tempF = tempC * 9f / 5f + 32f;   // also show Fahrenheit
+                float tempF = tempC * 9f / 5f + 32f;
                 int healthCode = battery.GetIntExtra(BatteryManager.ExtraHealth, -1);
-                string health = BatteryHealthLabel(healthCode);
 
-                // Plain-language temperature assessment
                 string assessment;
                 string assessEmoji;
-                if (tempRaw < 0)
-                {
-                    assessment = "Unknown";
-                    assessEmoji = "❓";
-                }
-                else if (tempC < 0)
-                {
-                    assessment = "Too cold — may affect performance";
-                    assessEmoji = "🥶";
-                }
-                else if (tempC <= 20)
-                {
-                    assessment = "Cool";
-                    assessEmoji = "❄️";
-                }
-                else if (tempC <= 35)
-                {
-                    assessment = "Normal";
-                    assessEmoji = "✅";
-                }
-                else if (tempC <= 45)
-                {
-                    assessment = "Warm — monitor closely";
-                    assessEmoji = "⚠️";
-                }
-                else
-                {
-                    assessment = "HOT — risk of throttling or shutdown";
-                    assessEmoji = "🔥";
-                }
+
+                if (tempRaw < 0) { assessment = "Unknown"; assessEmoji = "❓"; }
+                else if (tempC < 0) { assessment = "Too cold — may affect performance"; assessEmoji = "🥶"; }
+                else if (tempC <= 20) { assessment = "Cool"; assessEmoji = "❄️"; }
+                else if (tempC <= 35) { assessment = "Normal"; assessEmoji = "✅"; }
+                else if (tempC <= 45) { assessment = "Warm — monitor closely"; assessEmoji = "⚠️"; }
+                else { assessment = "HOT — risk of throttling or shutdown"; assessEmoji = "🔥"; }
 
                 string tempDisplay = tempRaw >= 0
                     ? $"{tempC:F1} °C  ({tempF:F1} °F)"
@@ -1084,7 +1073,7 @@ namespace Finder.Droid.Managers
                     $"🌡 *Battery Temperature*\n\n" +
                     $"Temperature: {tempDisplay}\n" +
                     $"Assessment:  {assessEmoji} {assessment}\n" +
-                    $"Health:      {health}\n" +
+                    $"Health:      {BatteryHealthLabel(healthCode)}\n" +
                     $"Time:        {DateTime.Now:HH:mm:ss}";
             }
             catch (Exception ex)
@@ -1094,29 +1083,19 @@ namespace Finder.Droid.Managers
         }
 
         /// <summary>
-        /// /storage — internal storage: total, used, free.
-        /// Uses StatFs on the data partition (same partition the app uses).
-        /// Also checks external storage if available.
-        /// No permissions required.
+        /// /storage — internal storage (data partition): total, used, free.
+        /// Also reports external SD card if mounted. No permissions required.
         /// </summary>
         private string GetStorageReport()
         {
             try
             {
-                // ── Internal storage (data partition) ─────────────────────────
-                var internalStats = new StatFs(
-                    Android.OS.Environment.DataDirectory.AbsolutePath);
-
-                long blockSize = internalStats.BlockSizeLong;
-                long totalBlocks = internalStats.BlockCountLong;
-                long availBlocks = internalStats.AvailableBlocksLong;
-                long totalBytes = blockSize * totalBlocks;
-                long freeBytes = blockSize * availBlocks;
+                var stat = new StatFs(Android.OS.Environment.DataDirectory.AbsolutePath);
+                long blockSize = stat.BlockSizeLong;
+                long totalBytes = stat.BlockCountLong * blockSize;
+                long freeBytes = stat.AvailableBlocksLong * blockSize;
                 long usedBytes = totalBytes - freeBytes;
-
-                // Compute fill percentage and ASCII bar
-                int fillPct = totalBytes > 0
-                    ? (int)(usedBytes * 100L / totalBytes) : 0;
+                int fillPct = totalBytes > 0 ? (int)(usedBytes * 100L / totalBytes) : 0;
                 string bar = StorageBar(fillPct);
 
                 string report =
@@ -1126,19 +1105,17 @@ namespace Finder.Droid.Managers
                     $"Free:  {FormatBytes(freeBytes)}  ({100 - fillPct}%)\n\n" +
                     $"`{bar}` {fillPct}%";
 
-                // ── External SD card (optional) ───────────────────────────────
+                // External SD card (optional)
                 try
                 {
                     if (Android.OS.Environment.ExternalStorageState ==
                         Android.OS.Environment.MediaMounted)
                     {
-                        var extStats = new StatFs(
-                            Android.OS.Environment
-                                .ExternalStorageDirectory.AbsolutePath);
-
-                        long extBlock = extStats.BlockSizeLong;
-                        long extTotal = extStats.BlockCountLong * extBlock;
-                        long extFree = extStats.AvailableBlocksLong * extBlock;
+                        var extStat = new StatFs(
+                            Android.OS.Environment.ExternalStorageDirectory.AbsolutePath);
+                        long extBlock = extStat.BlockSizeLong;
+                        long extTotal = extStat.BlockCountLong * extBlock;
+                        long extFree = extStat.AvailableBlocksLong * extBlock;
                         long extUsed = extTotal - extFree;
                         int extPct = extTotal > 0
                             ? (int)(extUsed * 100L / extTotal) : 0;
@@ -1162,7 +1139,7 @@ namespace Finder.Droid.Managers
         }
 
         /// <summary>
-        /// /memory — RAM: total, available, used, and Android's low-memory flag.
+        /// /memory — RAM: total, available, used, Android's low-memory flag.
         /// Uses ActivityManager.MemoryInfo — no permissions required.
         /// </summary>
         private string GetMemoryReport()
@@ -1180,8 +1157,7 @@ namespace Finder.Droid.Managers
                 int usedPct = totalRam > 0
                     ? (int)(usedRam * 100L / totalRam) : 0;
                 bool lowMem = memInfo.LowMemory;
-
-                string bar = StorageBar(usedPct);   // reuse same bar helper
+                string bar = StorageBar(usedPct);
 
                 return
                     $"🧠 *RAM*\n\n" +
@@ -1200,8 +1176,8 @@ namespace Finder.Droid.Managers
 
         /// <summary>
         /// /uptime — elapsed time since the last device reboot.
-        /// Computed from SystemClock.ElapsedRealtime() which counts ms since boot
-        /// including deep sleep — no permissions required.
+        /// Computed from SystemClock.ElapsedRealtime() — includes deep sleep,
+        /// no permissions required.
         /// </summary>
         private string GetUptimeReport()
         {
@@ -1214,17 +1190,12 @@ namespace Finder.Droid.Managers
                 long minutes = (totalSec % 3600) / 60;
                 long seconds = totalSec % 60;
 
-                // Estimate the boot time (wall clock - uptime)
                 DateTime bootTime = DateTime.Now.AddMilliseconds(-elapsedMs);
 
-                // Human-readable uptime string
                 string uptime;
-                if (days > 0)
-                    uptime = $"{days}d {hours}h {minutes}m";
-                else if (hours > 0)
-                    uptime = $"{hours}h {minutes}m {seconds}s";
-                else
-                    uptime = $"{minutes}m {seconds}s";
+                if (days > 0) uptime = $"{days}d {hours}h {minutes}m";
+                else if (hours > 0) uptime = $"{hours}h {minutes}m {seconds}s";
+                else uptime = $"{minutes}m {seconds}s";
 
                 return
                     $"⏱ *Device Uptime*\n\n" +
@@ -1242,10 +1213,6 @@ namespace Finder.Droid.Managers
         // 🔋 Device Health — private helper utilities
         // ═════════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Converts BatteryStatus integer to a readable label.
-        /// Uses plain int comparison to stay compatible with C# 7.3.
-        /// </summary>
         private static string BatteryStatusLabel(int code)
         {
             if (code == (int)BatteryStatus.Charging) return "⚡ Charging";
@@ -1255,10 +1222,6 @@ namespace Finder.Droid.Managers
             return "❓ Unknown";
         }
 
-        /// <summary>
-        /// Converts BatteryPlugged integer to a readable power source label.
-        /// 0 = unplugged, 1 = AC, 2 = USB, 4 = Wireless.
-        /// </summary>
         private static string PluggedLabel(int code)
         {
             if (code == (int)BatteryPlugged.Ac) return "🔌 AC Adapter";
@@ -1267,9 +1230,6 @@ namespace Finder.Droid.Managers
             return "🔋 Unplugged";
         }
 
-        /// <summary>
-        /// Converts BatteryHealth integer to a readable label.
-        /// </summary>
         private static string BatteryHealthLabel(int code)
         {
             if (code == (int)BatteryHealth.Good) return "✅ Good";
@@ -1280,40 +1240,26 @@ namespace Finder.Droid.Managers
             return "❓ Unknown";
         }
 
-        /// <summary>
-        /// Returns a battery emoji based on current level and charging state.
-        /// </summary>
         private static string BatteryEmoji(int pct, int statusCode)
         {
-            // Show lightning bolt when charging regardless of level
             if (statusCode == (int)BatteryStatus.Charging ||
-                statusCode == (int)BatteryStatus.Full)
-                return "⚡";
-
+                statusCode == (int)BatteryStatus.Full) return "⚡";
             if (pct < 0) return "❓";
             if (pct <= 10) return "🪫";
-            if (pct <= 30) return "🔋";
-            if (pct <= 70) return "🔋";
             return "🔋";
         }
 
         /// <summary>
-        /// Builds a 10-character ASCII progress bar for a 0–100 fill value.
-        /// Example: fillPct=65 → [██████░░░░]
+        /// Builds a 10-character ASCII progress bar. Example: 65% → [██████░░░░]
         /// </summary>
         private static string StorageBar(int fillPct)
         {
             const int barLen = 10;
-            int filled = (int)Math.Round(fillPct / 10.0);
-            filled = Math.Max(0, Math.Min(barLen, filled));
-            string full = new string('█', filled);
-            string empty = new string('░', barLen - filled);
-            return $"[{full}{empty}]";
+            int filled = Math.Max(0, Math.Min(barLen, (int)Math.Round(fillPct / 10.0)));
+            return $"[{new string('█', filled)}{new string('░', barLen - filled)}]";
         }
 
-        /// <summary>
-        /// Converts a byte count to a human-readable string (KB / MB / GB).
-        /// </summary>
+        /// <summary>Converts a byte count to KB / MB / GB string.</summary>
         private static string FormatBytes(long bytes)
         {
             if (bytes < 0) return "Unknown";
@@ -1406,10 +1352,7 @@ namespace Finder.Droid.Managers
             catch { return false; }
         }
 
-        /// <summary>
-        /// Returns battery level as 0-100, or -1 if unavailable.
-        /// Used internally and by /status, /gpsstatus, and /location.
-        /// </summary>
+        /// <summary>Returns battery level 0-100, or -1 if unavailable.</summary>
         private int GetBatteryLevel()
         {
             try
@@ -1557,47 +1500,6 @@ namespace Finder.Droid.Managers
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Startup message
-        // ─────────────────────────────────────────────────────────────────────
-
-        private async Task SendStartupMessageAsync()
-        {
-            try
-            {
-                if ((DateTime.Now - _lastStartupMessage).TotalSeconds < STARTUP_COOLDOWN_S)
-                    return;
-
-                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
-                if (suppress)
-                {
-                    var ed = prefs.Edit();
-                    ed.PutBoolean("suppress_next_startup_message", false);
-                    ed.Apply();
-                    return;
-                }
-
-                _lastStartupMessage = DateTime.Now;
-
-                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                var ver = assembly.GetName().Version;
-                string vs = $"{ver.Major}.{ver.Minor}.{ver.Build}";
-
-                int bat = GetBatteryLevel();
-                string batStr = bat >= 0 ? $"{bat}%" : "Unknown";
-
-                await SendTelegramMessageAsync(
-                    LoadSettings().BotToken,
-                    LoadSettings().ChatId,
-                    $"📡 *Finder v{vs} is running*\n" +
-                    $"Battery: {batStr}\n" +
-                    $"Time:    {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n" +
-                    "Send /cmd for all available commands.");
-            }
-            catch { }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
         // Settings helpers
         // ─────────────────────────────────────────────────────────────────────
 
@@ -1629,9 +1531,160 @@ namespace Finder.Droid.Managers
 
         private static string MaskToken(string token)
         {
-            if (string.IsNullOrEmpty(token) || token.Length < 8)
-                return "***";
+            if (string.IsNullOrEmpty(token) || token.Length < 8) return "***";
             return token.Substring(0, 4) + "…" + token.Substring(token.Length - 4);
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Startup message
+        // ─────────────────────────────────────────────────────────────────────
+
+        private async Task SendStartupMessageAsync()
+        {
+            try
+            {
+                // Respect the suppress flag set by /restart to avoid double messages
+                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
+                if (suppress)
+                {
+                    var ed = prefs.Edit();
+                    ed.PutBoolean("suppress_next_startup_message", false);
+                    ed.Apply();
+                    return;
+                }
+
+                if ((DateTime.Now - _lastStartupMessage).TotalSeconds < STARTUP_COOLDOWN_S)
+                    return;
+                _lastStartupMessage = DateTime.Now;
+
+                var ver = System.Reflection.Assembly
+                    .GetExecutingAssembly().GetName().Version;
+                string vs = $"{ver.Major}.{ver.Minor}.{ver.Build}";
+
+                int bat = GetBatteryLevel();
+                string batStr = bat >= 0 ? $"{bat}%" : "Unknown";
+
+                await SendTelegramMessageAsync(
+                    LoadSettings().BotToken,
+                    LoadSettings().ChatId,
+                    $"📡 *Finder v{vs} is running*\n" +
+                    $"Battery: {batStr}\n" +
+                    $"Time:    {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n" +
+                    "Send /cmd for all available commands.");
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Pending update — auto-resume after permission grant
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Called by MainActivity.OnResume every time the app returns to the
+        /// foreground — including after the user comes back from the
+        /// "Install Unknown Apps" settings screen.
+        ///
+        /// If the permission is now granted AND a pending update was stored
+        /// earlier, this method performs the full download + install flow
+        /// automatically. No need to send /update again.
+        ///
+        /// This is a no-op when:
+        ///   • There is no pending update in SharedPreferences.
+        ///   • The install permission is still not granted.
+        /// </summary>
+        public static async Task ResumePendingUpdateAsync(Android.Content.Context context)
+        {
+            // Guard: permission must be granted now
+            if (!ApkInstaller.CanInstallPackages(context)) return;
+
+            // Guard: a pending update must have been stored
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(context);
+            string version = prefs.GetString(PREF_PENDING_UPDATE_VERSION, null);
+            string url = prefs.GetString(PREF_PENDING_UPDATE_URL, null);
+
+            if (string.IsNullOrEmpty(version) || string.IsNullOrEmpty(url)) return;
+
+            // Clear immediately — prevents double-trigger if OnResume fires twice
+            ClearPendingUpdate(context);
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[TelegramCommandHandler] Auto-resuming pending update → v{version}");
+
+            try
+            {
+                // Notify in-app UI: download starting
+                MessagingCenter.Send<object, string>(
+                    new object(),
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_STARTED,
+                    $"→ v{version}");
+
+                // Download
+                var downloader = new ApkDownloaderService(context);
+                var result = await downloader.DownloadApkAsync(url, progress =>
+                {
+                    MessagingCenter.Send<object, string>(
+                        new object(),
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_PROGRESS,
+                        progress.ToString());
+                });
+
+                if (!result.IsSuccess)
+                {
+                    MessagingCenter.Send<object, string>(
+                        new object(),
+                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                        result.FailReason);
+
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[TelegramCommandHandler] Auto-resume download failed: " +
+                        result.FailReason);
+                    return;
+                }
+
+                // Install
+                MessagingCenter.Send<object, string>(
+                    new object(),
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_INSTALLING,
+                    version);
+
+                ApkInstaller.Install(context, result.FilePath);
+
+                MessagingCenter.Send<object, string>(
+                    new object(),
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_COMPLETE,
+                    version);
+            }
+            catch (Exception ex)
+            {
+                MessagingCenter.Send<object, string>(
+                    new object(),
+                    Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
+                    ex.Message);
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TelegramCommandHandler] Auto-resume exception: {ex.Message}");
+            }
+        }
+
+        /// <summary>Instance version — uses _context.</summary>
+        private void ClearPendingUpdate()
+            => ClearPendingUpdate(_context);
+
+        /// <summary>
+        /// Static version — used by ResumePendingUpdateAsync which has no instance.
+        /// </summary>
+        private static void ClearPendingUpdate(Android.Content.Context context)
+        {
+            try
+            {
+                var ed = PreferenceManager
+                    .GetDefaultSharedPreferences(context).Edit();
+                ed.Remove(PREF_PENDING_UPDATE_VERSION);
+                ed.Remove(PREF_PENDING_UPDATE_URL);
+                ed.Apply();
+            }
+            catch { }
         }
     }
 
@@ -1658,8 +1711,10 @@ namespace Finder.Droid.Managers
 
         public void OnProviderDisabled(string provider) { }
         public void OnProviderEnabled(string provider) { }
-        public void OnStatusChanged(string provider,
-            DroidLocation.Availability status, Android.OS.Bundle extras)
+        public void OnStatusChanged(
+            string provider,
+            DroidLocation.Availability status,
+            Android.OS.Bundle extras)
         { }
     }
 }
