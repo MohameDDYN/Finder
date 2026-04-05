@@ -86,111 +86,54 @@ namespace Finder.Droid.Managers
 
         public void Start(bool sendStartupMessage = false)
         {
-            try
-            {
-                var settings = LoadSettings();
-                if (string.IsNullOrEmpty(settings.BotToken) ||
-                    string.IsNullOrEmpty(settings.ChatId)) return;
+            if (!IsPollingEnabled()) return;
 
-                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-                bool pollingEnabled = prefs.GetBoolean(PREF_POLLING_ENABLED, true);
-                if (!pollingEnabled) return;
+            int intervalMs = GetSavedPollIntervalMs();
+            RestartPollTimer(intervalMs);
 
-                int pollIntervalMs = prefs.GetInt(PREF_POLL_INTERVAL_MS,
-                    DEFAULT_POLL_INTERVAL_MS);
-                if (pollIntervalMs < MIN_POLL_INTERVAL_MS)
-                    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
-
-                RestartPollTimer(pollIntervalMs);
-
-                if (sendStartupMessage)
-                {
-                    bool suppress = prefs.GetBoolean(
-                        "suppress_next_startup_message", false);
-                    if (suppress)
-                    {
-                        var editor = prefs.Edit();
-                        editor.PutBoolean("suppress_next_startup_message", false);
-                        editor.Apply();
-                    }
-                    else if ((DateTime.Now - _lastStartupMessage).TotalSeconds
-                             > STARTUP_COOLDOWN_S)
-                    {
-                        _lastStartupMessage = DateTime.Now;
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(2000);
-                            await SendTelegramMessageAsync(
-                                settings.BotToken, settings.ChatId,
-                                "🤖 Finder service started");
-                        });
-                    }
-                }
-            }
-            catch { /* Silent fail */ }
+            if (sendStartupMessage)
+                _ = SendStartupMessageAsync();
         }
 
         public void Stop()
         {
+            _pollTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _pollTimer?.Dispose();
             _pollTimer = null;
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Poll-timer helpers
+        // Notification channel creation
         // ─────────────────────────────────────────────────────────────────────
 
-        private void RestartPollTimer(int intervalMs)
+        private void CreateGpsAlertNotificationChannel()
         {
-            _pollTimer?.Dispose();
-            _pollTimer = new Timer(PollForCommands, null, 0, intervalMs);
-
-            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
-            editor.PutInt(PREF_POLL_INTERVAL_MS, intervalMs);
-            editor.Apply();
-        }
-
-        private int GetSavedPollIntervalMs()
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS);
-        }
-
-        private bool IsPollingEnabled()
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetBoolean(PREF_POLLING_ENABLED, true);
-        }
-
-        private void SetPollingEnabled(bool enabled)
-        {
-            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
-            editor.PutBoolean(PREF_POLLING_ENABLED, enabled);
-            editor.Apply();
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // GPS provider helpers
-        // ─────────────────────────────────────────────────────────────────────
-
-        private string GetActiveGpsProvider()
-        {
-            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
-            return prefs.GetString(
-                BackgroundLocationService.PREF_KEY_GPS_PROVIDER, "fused") ?? "fused";
-        }
-
-        private void BroadcastGpsProvider(string provider)
-        {
-            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
-            editor.PutString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, provider);
-            editor.Apply();
-
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
             try
             {
-                var intent = new Intent(BackgroundLocationService.ACTION_SET_GPS_PROVIDER);
-                intent.PutExtra("provider", provider);
-                _context.SendBroadcast(intent);
+                var channel = new NotificationChannel(
+                    GPS_ALERT_CHANNEL_ID,
+                    "GPS Alerts",
+                    NotificationImportance.High);
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.CreateNotificationChannel(channel);
+            }
+            catch { }
+        }
+
+        private void CreateUpdateNotificationChannel()
+        {
+            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
+            try
+            {
+                var channel = new NotificationChannel(
+                    UPDATE_CHANNEL_ID,
+                    "App Updates",
+                    NotificationImportance.High);
+                var nm = (NotificationManager)_context
+                    .GetSystemService(Context.NotificationService);
+                nm?.CreateNotificationChannel(channel);
             }
             catch { }
         }
@@ -287,8 +230,7 @@ namespace Finder.Droid.Managers
 
                     // ── /interval ────────────────────────────────────────────
                     case "/interval":
-                        if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds
-                            < INTERVAL_COOLDOWN_S)
+                        if ((DateTime.Now - _lastIntervalUpdate).TotalSeconds < INTERVAL_COOLDOWN_S)
                         {
                             response = $"⏳ Cooldown active. Wait {INTERVAL_COOLDOWN_S}s.";
                             break;
@@ -356,38 +298,40 @@ namespace Finder.Droid.Managers
                             else
                             {
                                 RestartPollTimer(pollMs);
-                                response =
-                                    $"🔄 Poll interval → *{pollSec}s*\n" +
-                                    "60s = balanced · 120s = saver · 10s = fastest";
+                                response = $"⏱ Poll interval set to {pollSec}s.";
                             }
                         }
                         else
                         {
-                            int curSec = GetSavedPollIntervalMs() / 1000;
-                            response =
-                                $"❌ Usage: /pollinterval [sec] (min 10)\n" +
-                                $"Current: *{curSec}s*";
+                            int cur = GetSavedPollIntervalMs();
+                            response = $"📡 Poll interval: *{cur / 1000}s*\n" +
+                                       "/pollinterval [sec] (min 10)";
                         }
                         break;
 
                     // ── /status ──────────────────────────────────────────────
                     case "/status":
-                        var statusFiles = _geoJsonManager.GetAvailableDataFiles();
                         bool sendsPaused = IsTelegramSendingPaused();
+                        bool pollEnabled = IsPollingEnabled();
                         bool autoStart = Preferences.Get(
                             Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
-                        bool pollEnabled = IsPollingEnabled();
-                        int pollSecs = GetSavedPollIntervalMs() / 1000;
                         string activeProvider = GetActiveGpsProvider();
                         string providerLabel = activeProvider == "raw"
-                            ? "🛰 Raw GPS (max accuracy)"
-                            : "🔋 Fused (battery saver)";
+                            ? "🛰 Raw GPS" : "🔋 Fused";
+                        int pollSecs = GetSavedPollIntervalMs() / 1000;
+                        var statusFiles = _geoJsonManager.GetAvailableDataFiles();
 
-                        // Read installed version from AssemblyInfo
-                        var asm = System.Reflection.Assembly.GetExecutingAssembly();
-                        var ver = asm.GetName().Version;
+                        var statusAssembly = System.Reflection.Assembly
+                            .GetExecutingAssembly();
+                        var statusVersion = statusAssembly.GetName().Version;
                         string versionStr =
-                            $"{ver.Major}.{ver.Minor}.{ver.Build}";
+                            $"{statusVersion.Major}.{statusVersion.Minor}" +
+                            $".{statusVersion.Build}";
+
+                        // Include battery in status for convenience
+                        int statusBattery = GetBatteryLevel();
+                        string batteryStr = statusBattery >= 0
+                            ? $"{statusBattery}%" : "Unknown";
 
                         response =
                             $"📍 *Status*\n" +
@@ -401,6 +345,7 @@ namespace Finder.Droid.Managers
                             $"Send interval:   {currentSettings.Interval} ms\n" +
                             $"Data files:      {statusFiles.Count}\n" +
                             $"App version:     v{versionStr}\n" +
+                            $"Battery:         {batteryStr}\n" +
                             $"Device time:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
 
                         if (sendsPaused) response += "\n\n💡 /resumelocation to resume.";
@@ -424,8 +369,7 @@ namespace Finder.Droid.Managers
 
                     // ── /restart ─────────────────────────────────────────────
                     case "/restart":
-                        if ((DateTime.Now - _lastRestartCommand).TotalSeconds
-                            < RESTART_COOLDOWN_S)
+                        if ((DateTime.Now - _lastRestartCommand).TotalSeconds < RESTART_COOLDOWN_S)
                         {
                             int rem = RESTART_COOLDOWN_S -
                                 (int)(DateTime.Now - _lastRestartCommand).TotalSeconds;
@@ -437,8 +381,7 @@ namespace Finder.Droid.Managers
                         var suppressPrefs = PreferenceManager
                             .GetDefaultSharedPreferences(_context);
                         var suppressEditor = suppressPrefs.Edit();
-                        suppressEditor.PutBoolean(
-                            "suppress_next_startup_message", true);
+                        suppressEditor.PutBoolean("suppress_next_startup_message", true);
                         suppressEditor.Apply();
 
                         StopService();
@@ -536,20 +479,11 @@ namespace Finder.Droid.Managers
 
                     // ── /enablelocation ──────────────────────────────────────
                     case "/enablelocation":
-                        if (IsGpsEnabled())
-                        {
-                            response = "✅ GPS is already enabled.";
-                        }
-                        else
-                        {
-                            ShowEnableLocationNotification();
-                            response =
-                                "📲 Notification sent — tap it to open Location Settings.";
-                        }
+                        ShowEnableLocationNotification();
+                        response = "📲 Notification sent — tap it on the device to open Location Settings.";
                         break;
 
                     // ── /location ────────────────────────────────────────────
-                    // Always uses raw GPS regardless of the active provider.
                     case "/location":
                         await HandleLocationCommandAsync(currentSettings);
                         response = null;
@@ -564,10 +498,7 @@ namespace Finder.Droid.Managers
                         else
                         {
                             BroadcastSendingPaused(true);
-                            response =
-                                "⏸ *Location sends paused*\n" +
-                                "GPS + GeoJSON still running.\n" +
-                                "Send /resumelocation to turn back on.";
+                            response = "⏸ *Location sends paused.*\n/resumelocation to resume.";
                         }
                         break;
 
@@ -590,14 +521,12 @@ namespace Finder.Droid.Managers
                         {
                             case "on":
                                 Preferences.Set(
-                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START,
-                                    true);
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, true);
                                 response = "✅ Auto-start enabled.";
                                 break;
                             case "off":
                                 Preferences.Set(
-                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START,
-                                    false);
+                                    Finder.ViewModels.MainViewModel.PREF_AUTO_START, false);
                                 response = "❌ Auto-start disabled.";
                                 break;
                             default:
@@ -608,8 +537,7 @@ namespace Finder.Droid.Managers
 
                     // ── /version ─────────────────────────────────────────────
                     case "/version":
-                        var runningAssembly = System.Reflection.Assembly
-                            .GetExecutingAssembly();
+                        var runningAssembly = System.Reflection.Assembly.GetExecutingAssembly();
                         var runningVersion = runningAssembly.GetName().Version;
                         response =
                             $"📦 *Finder — Installed Version*\n\n" +
@@ -633,7 +561,53 @@ namespace Finder.Droid.Managers
                         response = null;
                         break;
 
-                    // ── /cmd (help) ───────────────────────────────────────────
+                    // ═════════════════════════════════════════════════════════
+                    // 🔋 DEVICE HEALTH COMMANDS
+                    // ═════════════════════════════════════════════════════════
+
+                    // ── /battery ─────────────────────────────────────────────
+                    // Detailed battery status: level, charging state, plug type,
+                    // temperature, voltage and health — all from BatteryManager.
+                    case "/battery":
+                        response = GetBatteryReport();
+                        break;
+
+                    // ── /charging ────────────────────────────────────────────
+                    // Focused view on charging state and power source only.
+                    case "/charging":
+                        response = GetChargingReport();
+                        break;
+
+                    // ── /temperature ─────────────────────────────────────────
+                    // Battery temperature plus a plain-language health label.
+                    case "/temperature":
+                        response = GetTemperatureReport();
+                        break;
+
+                    // ── /storage ─────────────────────────────────────────────
+                    // Internal storage: total, used, free — as a progress bar
+                    // so the fill level is instantly readable in chat.
+                    case "/storage":
+                        response = GetStorageReport();
+                        break;
+
+                    // ── /memory ──────────────────────────────────────────────
+                    // RAM: total, available, used, and the low-memory flag
+                    // raised by Android when memory is critically constrained.
+                    case "/memory":
+                        response = GetMemoryReport();
+                        break;
+
+                    // ── /uptime ──────────────────────────────────────────────
+                    // Time elapsed since the last device reboot, computed from
+                    // SystemClock.ElapsedRealtime() — no permissions required.
+                    case "/uptime":
+                        response = GetUptimeReport();
+                        break;
+
+                    // ═════════════════════════════════════════════════════════
+                    // /cmd — command list (help)
+                    // ═════════════════════════════════════════════════════════
                     case "/cmd":
                     default:
                         response =
@@ -652,6 +626,13 @@ namespace Finder.Droid.Managers
                             "📤 *Location sends*\n" +
                             "/interval [ms] (min 5000)\n" +
                             "/pauselocation · /resumelocation\n\n" +
+                            "🔋 *Device Health*\n" +
+                            "/battery     — level, status, plug, voltage\n" +
+                            "/charging    — charge source & state\n" +
+                            "/temperature — battery temp & health\n" +
+                            "/storage     — internal storage usage\n" +
+                            "/memory      — RAM usage\n" +
+                            "/uptime      — time since last reboot\n\n" +
                             "📂 *Data*\n" +
                             "/today · /yesterday\n" +
                             "/report YYYY-MM-DD\n" +
@@ -688,80 +669,47 @@ namespace Finder.Droid.Managers
                 {
                     var lm = (DroidLocation.LocationManager)_context
                         .GetSystemService(Context.LocationService);
+
                     rawLocation = lm?.GetLastKnownLocation(
                         DroidLocation.LocationManager.GpsProvider);
                 }
                 catch { }
 
-                // Step 2: request a fresh fix (up to 20 seconds)
-                if (rawLocation == null)
-                    rawLocation = await GetFreshRawGpsFixAsync(20);
-
-                // Step 3: fall back to fused last-known if raw GPS is unavailable
+                // Step 2: if no cached fix, request a fresh one (times out in 30s)
                 if (rawLocation == null)
                 {
-                    AndroidLocation fallback = null;
-                    try
-                    {
-                        var lm = (DroidLocation.LocationManager)_context
-                            .GetSystemService(Context.LocationService);
-                        fallback = lm?.GetLastKnownLocation(
-                            DroidLocation.LocationManager.NetworkProvider);
-                        if (fallback == null)
-                            fallback = lm?.GetLastKnownLocation(
-                                DroidLocation.LocationManager.PassiveProvider);
-                    }
-                    catch { }
+                    rawLocation = await RequestFreshGpsFixAsync();
+                }
 
-                    if (fallback == null)
-                    {
-                        await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                            "❌ No location available.\n" +
-                            "Make sure GPS is enabled and try again in a moment.");
-                        return;
-                    }
-
-                    string fbLat = fallback.Latitude.ToString(CultureInfo.InvariantCulture);
-                    string fbLon = fallback.Longitude.ToString(CultureInfo.InvariantCulture);
-                    string fbMaps = $"https://www.google.com/maps?q={fbLat},{fbLon}";
-
-                    await _httpClient.GetStringAsync(
-                        $"https://api.telegram.org/bot{settings.BotToken}" +
-                        $"/sendLocation?chat_id={settings.ChatId}" +
-                        $"&latitude={fbLat}&longitude={fbLon}");
-
+                if (rawLocation == null)
+                {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"📍 *Last Known Location* _(fallback — not raw GPS)_\n" +
-                        $"Lat: `{fbLat}`\nLon: `{fbLon}`\n" +
-                        $"Accuracy: {fallback.Accuracy:F0} m\n" +
-                        $"[Open in Google Maps]({fbMaps})");
+                        "❌ Could not get a GPS fix. Make sure GPS is enabled and the " +
+                        "device has sky visibility.");
                     return;
                 }
 
-                // Step 4: send the raw GPS fix
-                string lat = rawLocation.Latitude.ToString(CultureInfo.InvariantCulture);
-                string lon = rawLocation.Longitude.ToString(CultureInfo.InvariantCulture);
-                string maps = $"https://www.google.com/maps?q={lat},{lon}";
-                string age = GetFixAgeDescription(rawLocation.Time);
+                string mapsUrl =
+                    $"https://www.google.com/maps?q={rawLocation.Latitude},{rawLocation.Longitude}";
 
-                string accuracy = rawLocation.HasAccuracy
-                    ? $"{rawLocation.Accuracy:F0} m" : "unknown";
-                string speed = rawLocation.HasSpeed
-                    ? $"{rawLocation.Speed * 3.6:F1} km/h" : "—";
+                int bat = GetBatteryLevel();
+                string batStr = bat >= 0 ? $"{bat}%" : "unknown";
 
-                await _httpClient.GetStringAsync(
-                    $"https://api.telegram.org/bot{settings.BotToken}" +
-                    $"/sendLocation?chat_id={settings.ChatId}" +
-                    $"&latitude={lat}&longitude={lon}");
+                string msg =
+                    $"📍 *Current Location*\n\n" +
+                    $"Lat: `{rawLocation.Latitude:F6}`\n" +
+                    $"Lng: `{rawLocation.Longitude:F6}`\n" +
+                    (rawLocation.HasAltitude
+                        ? $"Alt: {rawLocation.Altitude:F1} m\n" : "") +
+                    (rawLocation.HasAccuracy
+                        ? $"Accuracy: ±{rawLocation.Accuracy:F0} m\n" : "") +
+                    (rawLocation.HasSpeed
+                        ? $"Speed: {rawLocation.Speed * 3.6:F1} km/h\n" : "") +
+                    $"Battery: {batStr}\n" +
+                    $"Time: {DateTime.Now:HH:mm:ss}\n\n" +
+                    $"[Open in Maps]({mapsUrl})";
 
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"📍 *Current Location* _(raw GPS)_\n" +
-                    $"Lat:      `{lat}`\n" +
-                    $"Lon:      `{lon}`\n" +
-                    $"Accuracy: {accuracy}\n" +
-                    $"Speed:    {speed}\n" +
-                    $"Fix age:  {age}\n" +
-                    $"[Open in Google Maps]({maps})");
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId, msg);
             }
             catch (Exception ex)
             {
@@ -770,135 +718,40 @@ namespace Finder.Droid.Managers
             }
         }
 
-        /// <summary>
-        /// Requests a single fresh raw GPS fix via a one-shot ILocationListener.
-        /// Returns null if no fix arrives within timeoutSeconds.
-        /// Uses positional long/float args — no named parameters (avoids CS1739).
-        /// </summary>
-        private Task<AndroidLocation> GetFreshRawGpsFixAsync(int timeoutSeconds)
+        private async Task<AndroidLocation> RequestFreshGpsFixAsync()
         {
             var tcs = new TaskCompletionSource<AndroidLocation>();
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+            cts.Token.Register(() => tcs.TrySetResult(null));
+
             try
             {
                 var lm = (DroidLocation.LocationManager)_context
                     .GetSystemService(Context.LocationService);
 
-                if (lm == null ||
-                    !lm.IsProviderEnabled(DroidLocation.LocationManager.GpsProvider))
-                {
-                    tcs.TrySetResult(null);
-                    return tcs.Task;
-                }
+                var listener = new SingleShotLocationListener(loc =>
+                    tcs.TrySetResult(loc));
 
-                var listener = new SingleShotLocationListener(
-                    fix => tcs.TrySetResult(fix));
+                lm?.RequestSingleUpdate(
+                    DroidLocation.LocationManager.GpsProvider, listener, null);
 
-                lm.RequestLocationUpdates(
-                    DroidLocation.LocationManager.GpsProvider,
-                    0L,    // minTimeMs (long)
-                    0f,    // minDistanceM (float)
-                    listener);
-
-                Task.Delay(timeoutSeconds * 1000).ContinueWith(_ =>
-                {
-                    try { lm.RemoveUpdates(listener); } catch { }
-                    tcs.TrySetResult(null);
-                });
+                return await tcs.Task;
             }
             catch
             {
-                tcs.TrySetResult(null);
+                return null;
             }
-            return tcs.Task;
-        }
-
-        /// <summary>Returns a human-readable description of how old a GPS fix is.</summary>
-        private static string GetFixAgeDescription(long fixTimeMs)
-        {
-            try
+            finally
             {
-                var age = DateTime.UtcNow -
-                          DateTimeOffset.FromUnixTimeMilliseconds(fixTimeMs).UtcDateTime;
-                if (age.TotalSeconds < 5) return "just now";
-                if (age.TotalSeconds < 60) return $"{(int)age.TotalSeconds}s ago";
-                if (age.TotalMinutes < 60) return $"{(int)age.TotalMinutes} min ago";
-                return $"{(int)age.TotalHours}h ago";
-            }
-            catch { return "unknown"; }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // GeoJSON report handler
-        // ─────────────────────────────────────────────────────────────────────
-
-        private async Task HandleGeoJsonReportAsync(AppSettings settings, DateTime date)
-        {
-            try
-            {
-                string filePath = _geoJsonManager.GetFilePathForDate(date);
-                if (!File.Exists(filePath))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"📂 No data for {date:yyyy-MM-dd}.");
-                    return;
-                }
-
-                string geoJson = await _geoJsonManager.GenerateGeoJsonForDate(date);
-                if (string.IsNullOrEmpty(geoJson))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"⚠️ Could not generate GeoJSON for {date:yyyy-MM-dd}.");
-                    return;
-                }
-
-                // Write to a temp file and send as document
-                string tempPath = Path.Combine(
-                    System.Environment.GetFolderPath(
-                        System.Environment.SpecialFolder.Personal),
-                    $"report_{date:yyyy-MM-dd}.geojson");
-
-                File.WriteAllText(tempPath, geoJson);
-
-                using (var content = new MultipartFormDataContent())
-                using (var fileStream = File.OpenRead(tempPath))
-                using (var fileContent = new System.Net.Http.StreamContent(fileStream))
-                {
-                    fileContent.Headers.ContentType =
-                        new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                    content.Add(fileContent, "document",
-                        Path.GetFileName(tempPath));
-
-                    string url =
-                        $"https://api.telegram.org/bot{settings.BotToken}" +
-                        $"/sendDocument?chat_id={settings.ChatId}" +
-                        $"&caption=📍 GeoJSON report for {date:yyyy-MM-dd}";
-
-                    await _httpClient.PostAsync(url, content);
-                }
-            }
-            catch (Exception ex)
-            {
-                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"❌ Report error: {ex.Message}");
+                cts.Dispose();
             }
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // Auto-update handler
+        // /update handler
         // ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Full handler for the /update [version] [url] command.
-        ///
-        /// Flow:
-        ///   1. Validate parameters and parse version.
-        ///   2. Compare requested version against installed AssemblyVersion.
-        ///   3. If newer: notify admin + show in-app progress card.
-        ///   4. Download APK via ApkDownloaderService (returns ApkDownloadResult).
-        ///   5. Validate APK magic bytes inside the service — reject HTML files.
-        ///   6. Trigger Android system installer via ApkInstaller.
-        ///   7. Send Telegram status reply at every stage.
-        /// </summary>
         private async Task HandleUpdateCommandAsync(
             string param, AppSettings settings)
         {
@@ -933,173 +786,88 @@ namespace Finder.Droid.Managers
                     string.IsNullOrWhiteSpace(updateParts[1]))
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Invalid format.*\n\n" +
-                        "Usage: `/update [version] [url]`\n\n" +
-                        "Both version and URL are required.\n" +
-                        "Example: `/update 1.0.2 https://...`");
+                        "❌ *Invalid format.*\n\nUsage: `/update [version] [url]`");
                     return;
                 }
 
                 string requestedVersionStr = updateParts[0].Trim();
-                string apkUrl = updateParts[1].Trim();
-
-                // ── Version parsing ───────────────────────────────────────────
-                Version requestedVersion;
-                if (!Version.TryParse(requestedVersionStr, out requestedVersion))
-                {
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"❌ *Invalid version format:* `{requestedVersionStr}`\n\n" +
-                        "Use dot-separated numbers: `1.0.2` or `1.0.2.0`");
-                    return;
-                }
+                string downloadUrl = updateParts[1].Trim();
 
                 // ── Version comparison ────────────────────────────────────────
-                var installedVersion = System.Reflection.Assembly
-                    .GetExecutingAssembly()
-                    .GetName()
-                    .Version;
+                var installedAssembly = System.Reflection.Assembly.GetExecutingAssembly();
+                var installedVersion = installedAssembly.GetName().Version;
 
-                var installed3 = new Version(
-                    installedVersion.Major,
-                    installedVersion.Minor,
-                    installedVersion.Build);
-
-                var requested3 = new Version(
-                    requestedVersion.Major,
-                    requestedVersion.Minor,
-                    requestedVersion.Build > 0 ? requestedVersion.Build : 0);
-
-                if (requested3 <= installed3)
+                if (!Version.TryParse(requestedVersionStr, out Version requestedVersion))
                 {
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        $"✅ *Already up to date.*\n\n" +
-                        $"Installed: `{installed3.Major}.{installed3.Minor}" +
-                        $".{installed3.Build}`\n" +
-                        $"Requested: `{requestedVersionStr}` — not newer.\n\n" +
-                        "Send `/version` to confirm the running version.");
+                        $"❌ Invalid version format: `{requestedVersionStr}`\n" +
+                        "Use `Major.Minor.Build` e.g. `1.0.2`");
                     return;
                 }
 
-                // ── All checks passed — begin update ──────────────────────────
+                string installedStr =
+                    $"{installedVersion.Major}.{installedVersion.Minor}.{installedVersion.Build}";
+
+                if (requestedVersion <= installedVersion)
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"ℹ️ Installed version (`{installedStr}`) is already " +
+                        $"≥ requested (`{requestedVersionStr}`). No update needed.");
+                    return;
+                }
+
                 _lastUpdateCommand = DateTime.Now;
 
-                string versionInfo =
-                    $"v{installed3.Major}.{installed3.Minor}.{installed3.Build}" +
-                    $" → v{requestedVersionStr}";
-
-                // Notify admin via Telegram
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"📥 *Update queued!*\n\n" +
-                    $"Installed: `{installed3.Major}.{installed3.Minor}" +
-                    $".{installed3.Build}`\n" +
-                    $"New:       `{requestedVersionStr}`\n\n" +
-                    "⬇️ Downloading APK now…\n" +
-                    "_Progress visible in the app UI._");
+                    $"⬆️ *Update initiated*\n\n" +
+                    $"`{installedStr}` → `{requestedVersionStr}`\n\n" +
+                    $"Downloading…");
 
-                // Show in-app progress card at 0%
+                // ── Notify in-app UI ──────────────────────────────────────────
                 MessagingCenter.Send<object, string>(
                     this,
                     Finder.ViewModels.MainViewModel.MSG_UPDATE_STARTED,
-                    versionInfo);
-
-                // Show Android status-bar notification
-                ShowUpdateProgressNotification(
-                    "Downloading Finder update…", 0, done: false);
+                    $"{installedStr} → {requestedVersionStr}");
 
                 // ── Download ──────────────────────────────────────────────────
                 var downloader = new ApkDownloaderService(_context);
-                int lastNotifiedPct = -1;
-
-                // ApkDownloaderService.DownloadApkAsync returns ApkDownloadResult
-                // (replaces the illegal async out parameter)
-                var downloadResult = await downloader.DownloadApkAsync(
-                    apkUrl,
+                var result = await downloader.DownloadApkAsync(
+                    downloadUrl,
                     progress =>
                     {
-                        // Update in-app progress card
                         MessagingCenter.Send<object, string>(
                             this,
                             Finder.ViewModels.MainViewModel.MSG_UPDATE_PROGRESS,
                             progress.ToString());
-
-                        // Throttle notification bar to every 5% change
-                        if (progress >= lastNotifiedPct + 5 || progress == 100)
-                        {
-                            lastNotifiedPct = progress;
-                            ShowUpdateProgressNotification(
-                                $"Downloading Finder update… {progress}%",
-                                progress,
-                                done: false);
-                        }
                     });
 
-                // ── Download or validation failed ─────────────────────────────
-                if (!downloadResult.IsSuccess)
+                if (!result.IsSuccess)
                 {
-                    CancelUpdateNotification();
-
-                    string failMsg = string.IsNullOrEmpty(downloadResult.FailReason)
-                        ? "Unknown error. Check URL and internet connection."
-                        : downloadResult.FailReason;
-
-                    // Notify in-app progress card — error state (auto-hides in 5s)
                     MessagingCenter.Send<object, string>(
                         this,
                         Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
-                        failMsg);
+                        result.FailReason);
 
                     await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "❌ *Download or validation failed.*\n\n" +
-                        $"Reason: `{failMsg}`\n\n" +
-                        "💡 *Quick fix for Google Drive:*\n" +
-                        "Use this exact URL format:\n" +
-                        "`https://drive.usercontent.google.com/download" +
-                        "?id=YOUR_FILE_ID&export=download&confirm=t`\n\n" +
-                        "And set the file to *Anyone with the link* → Viewer.");
+                        $"❌ *Download failed:*\n`{result.FailReason}`");
                     return;
                 }
 
-                string apkPath = downloadResult.FilePath;
-
-                // ── Download complete → install stage ─────────────────────────
-                ShowUpdateProgressNotification(
-                    "Download complete! Tap to install.", 100, done: true);
-
-                // Notify in-app card → "Ready to install" stage
+                // ── Install ───────────────────────────────────────────────────
                 MessagingCenter.Send<object, string>(
                     this,
                     Finder.ViewModels.MainViewModel.MSG_UPDATE_INSTALLING,
-                    versionInfo);
+                    requestedVersionStr);
 
-                // ── Check install permission (Android 8.0+) ───────────────────
-                if (!ApkInstaller.CanInstallPackages(_context))
-                {
-                    ApkInstaller.OpenInstallPermissionSettings(_context);
+                ApkInstaller.Install(_context, result.FilePath);
 
-                    MessagingCenter.Send<object, string>(
-                        this,
-                        Finder.ViewModels.MainViewModel.MSG_UPDATE_FAILED,
-                        "Enable 'Install unknown apps' in Settings, then retry.");
-
-                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                        "⚠️ *Permission required.*\n\n" +
-                        "'Install unknown apps' must be enabled for Finder.\n\n" +
-                        "A settings screen has opened on the device.\n" +
-                        "Enable it, then send `/update` again.");
-                    return;
-                }
-
-                // ── Trigger Android system installer ──────────────────────────
-                ApkInstaller.Install(_context, apkPath);
-
-                // Notify in-app card → complete state (auto-hides after 4s)
                 MessagingCenter.Send<object, string>(
                     this,
                     Finder.ViewModels.MainViewModel.MSG_UPDATE_COMPLETE,
-                    $"Tap Install on the device to finish — {versionInfo}");
+                    requestedVersionStr);
 
                 await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
-                    $"✅ *APK ready! Install prompt launched.*\n\n" +
+                    $"✅ *Install prompt launched.*\n\n" +
                     $"Version: `{requestedVersionStr}`\n\n" +
                     "📲 Tap *Install* on the device to complete the update.\n" +
                     "_The app restarts automatically after installation._");
@@ -1118,6 +886,441 @@ namespace Finder.Droid.Managers
                 }
                 catch { }
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // GeoJSON report handler
+        // ─────────────────────────────────────────────────────────────────────
+
+        private async Task HandleGeoJsonReportAsync(AppSettings settings, DateTime date)
+        {
+            try
+            {
+                string filePath = _geoJsonManager.GetFilePathForDate(date);
+                if (filePath == null || !File.Exists(filePath))
+                {
+                    await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                        $"📂 No data found for {date:yyyy-MM-dd}.");
+                    return;
+                }
+
+                string caption = $"📍 Location data for {date:yyyy-MM-dd}";
+                await SendFileToTelegramAsync(filePath, caption, settings);
+            }
+            catch (Exception ex)
+            {
+                await SendTelegramMessageAsync(settings.BotToken, settings.ChatId,
+                    $"❌ Report error: {ex.Message}");
+            }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // 🔋 DEVICE HEALTH — report builders
+        // Each method reads live Android APIs and returns a formatted string.
+        // ═════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// /battery — full battery snapshot.
+        /// Reads: level, status, plug type, temperature, voltage, health.
+        /// No extra permissions required (BatteryManager sticky broadcast).
+        /// </summary>
+        private string GetBatteryReport()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var battery = _context.RegisterReceiver(null, filter);
+
+                if (battery == null)
+                    return "❌ Could not read battery information.";
+
+                // ── Level ──────────────────────────────────────────────────────
+                int level = battery.GetIntExtra(BatteryManager.ExtraLevel, -1);
+                int scale = battery.GetIntExtra(BatteryManager.ExtraScale, 100);
+                int pct = scale > 0 ? (int)(level * 100f / scale) : -1;
+
+                // ── Status (charging / discharging / full / etc.) ──────────────
+                int statusCode = battery.GetIntExtra(BatteryManager.ExtraStatus, -1);
+                string status = BatteryStatusLabel(statusCode);
+
+                // ── Plug type (AC / USB / Wireless / Unplugged) ────────────────
+                int pluggedCode = battery.GetIntExtra(BatteryManager.ExtraPlugged, -1);
+                string plugged = PluggedLabel(pluggedCode);
+
+                // ── Temperature (tenths of °C → °C) ───────────────────────────
+                int tempRaw = battery.GetIntExtra(BatteryManager.ExtraTemperature, -1);
+                float tempC = tempRaw / 10f;
+                string tempStr = tempRaw >= 0 ? $"{tempC:F1} °C" : "Unknown";
+
+                // ── Voltage (mV) ──────────────────────────────────────────────
+                int voltMv = battery.GetIntExtra(BatteryManager.ExtraVoltage, -1);
+                string volt = voltMv > 0 ? $"{voltMv} mV" : "Unknown";
+
+                // ── Health ────────────────────────────────────────────────────
+                int healthCode = battery.GetIntExtra(BatteryManager.ExtraHealth, -1);
+                string health = BatteryHealthLabel(healthCode);
+
+                // ── Emoji indicator for level ─────────────────────────────────
+                string levelEmoji = BatteryEmoji(pct, statusCode);
+
+                return
+                    $"🔋 *Battery*\n\n" +
+                    $"{levelEmoji} Level:       {(pct >= 0 ? $"{pct}%" : "Unknown")}\n" +
+                    $"⚡ Status:      {status}\n" +
+                    $"🔌 Plugged:     {plugged}\n" +
+                    $"🌡 Temperature: {tempStr}\n" +
+                    $"⚡ Voltage:     {volt}\n" +
+                    $"❤️ Health:      {health}\n" +
+                    $"🕐 Time:        {DateTime.Now:HH:mm:ss}";
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Battery error: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// /charging — focused view on power source and charging state only.
+        /// Ideal for a quick "is the phone charging?" check.
+        /// </summary>
+        private string GetChargingReport()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var battery = _context.RegisterReceiver(null, filter);
+
+                if (battery == null)
+                    return "❌ Could not read charging information.";
+
+                int level = battery.GetIntExtra(BatteryManager.ExtraLevel, -1);
+                int scale = battery.GetIntExtra(BatteryManager.ExtraScale, 100);
+                int pct = scale > 0 ? (int)(level * 100f / scale) : -1;
+                int statusCode = battery.GetIntExtra(BatteryManager.ExtraStatus, -1);
+                int plugCode = battery.GetIntExtra(BatteryManager.ExtraPlugged, -1);
+
+                string status = BatteryStatusLabel(statusCode);
+                string plugged = PluggedLabel(plugCode);
+
+                // Determine if actually charging
+                bool isCharging =
+                    statusCode == (int)BatteryStatus.Charging ||
+                    statusCode == (int)BatteryStatus.Full;
+
+                string header = isCharging ? "⚡ *Charging*" : "🔋 *Not Charging*";
+
+                return
+                    $"{header}\n\n" +
+                    $"Status:  {status}\n" +
+                    $"Source:  {plugged}\n" +
+                    $"Level:   {(pct >= 0 ? $"{pct}%" : "Unknown")}\n" +
+                    $"Time:    {DateTime.Now:HH:mm:ss}";
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Charging error: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// /temperature — battery temperature + plain-language health label.
+        /// Temperature is reported by Android in tenths of a degree Celsius.
+        /// </summary>
+        private string GetTemperatureReport()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var battery = _context.RegisterReceiver(null, filter);
+
+                if (battery == null)
+                    return "❌ Could not read temperature.";
+
+                int tempRaw = battery.GetIntExtra(BatteryManager.ExtraTemperature, -1);
+                float tempC = tempRaw / 10f;
+                float tempF = tempC * 9f / 5f + 32f;   // also show Fahrenheit
+                int healthCode = battery.GetIntExtra(BatteryManager.ExtraHealth, -1);
+                string health = BatteryHealthLabel(healthCode);
+
+                // Plain-language temperature assessment
+                string assessment;
+                string assessEmoji;
+                if (tempRaw < 0)
+                {
+                    assessment = "Unknown";
+                    assessEmoji = "❓";
+                }
+                else if (tempC < 0)
+                {
+                    assessment = "Too cold — may affect performance";
+                    assessEmoji = "🥶";
+                }
+                else if (tempC <= 20)
+                {
+                    assessment = "Cool";
+                    assessEmoji = "❄️";
+                }
+                else if (tempC <= 35)
+                {
+                    assessment = "Normal";
+                    assessEmoji = "✅";
+                }
+                else if (tempC <= 45)
+                {
+                    assessment = "Warm — monitor closely";
+                    assessEmoji = "⚠️";
+                }
+                else
+                {
+                    assessment = "HOT — risk of throttling or shutdown";
+                    assessEmoji = "🔥";
+                }
+
+                string tempDisplay = tempRaw >= 0
+                    ? $"{tempC:F1} °C  ({tempF:F1} °F)"
+                    : "Unknown";
+
+                return
+                    $"🌡 *Battery Temperature*\n\n" +
+                    $"Temperature: {tempDisplay}\n" +
+                    $"Assessment:  {assessEmoji} {assessment}\n" +
+                    $"Health:      {health}\n" +
+                    $"Time:        {DateTime.Now:HH:mm:ss}";
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Temperature error: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// /storage — internal storage: total, used, free.
+        /// Uses StatFs on the data partition (same partition the app uses).
+        /// Also checks external storage if available.
+        /// No permissions required.
+        /// </summary>
+        private string GetStorageReport()
+        {
+            try
+            {
+                // ── Internal storage (data partition) ─────────────────────────
+                var internalStats = new StatFs(
+                    Android.OS.Environment.DataDirectory.AbsolutePath);
+
+                long blockSize = internalStats.BlockSizeLong;
+                long totalBlocks = internalStats.BlockCountLong;
+                long availBlocks = internalStats.AvailableBlocksLong;
+                long totalBytes = blockSize * totalBlocks;
+                long freeBytes = blockSize * availBlocks;
+                long usedBytes = totalBytes - freeBytes;
+
+                // Compute fill percentage and ASCII bar
+                int fillPct = totalBytes > 0
+                    ? (int)(usedBytes * 100L / totalBytes) : 0;
+                string bar = StorageBar(fillPct);
+
+                string report =
+                    $"💾 *Internal Storage*\n\n" +
+                    $"Total: {FormatBytes(totalBytes)}\n" +
+                    $"Used:  {FormatBytes(usedBytes)}  ({fillPct}%)\n" +
+                    $"Free:  {FormatBytes(freeBytes)}  ({100 - fillPct}%)\n\n" +
+                    $"`{bar}` {fillPct}%";
+
+                // ── External SD card (optional) ───────────────────────────────
+                try
+                {
+                    if (Android.OS.Environment.ExternalStorageState ==
+                        Android.OS.Environment.MediaMounted)
+                    {
+                        var extStats = new StatFs(
+                            Android.OS.Environment
+                                .ExternalStorageDirectory.AbsolutePath);
+
+                        long extBlock = extStats.BlockSizeLong;
+                        long extTotal = extStats.BlockCountLong * extBlock;
+                        long extFree = extStats.AvailableBlocksLong * extBlock;
+                        long extUsed = extTotal - extFree;
+                        int extPct = extTotal > 0
+                            ? (int)(extUsed * 100L / extTotal) : 0;
+
+                        report +=
+                            $"\n\n💽 *External Storage*\n" +
+                            $"Total: {FormatBytes(extTotal)}\n" +
+                            $"Used:  {FormatBytes(extUsed)}  ({extPct}%)\n" +
+                            $"Free:  {FormatBytes(extFree)}  ({100 - extPct}%)";
+                    }
+                }
+                catch { /* External storage not available — skip silently */ }
+
+                report += $"\n\n🕐 Time: {DateTime.Now:HH:mm:ss}";
+                return report;
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Storage error: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// /memory — RAM: total, available, used, and Android's low-memory flag.
+        /// Uses ActivityManager.MemoryInfo — no permissions required.
+        /// </summary>
+        private string GetMemoryReport()
+        {
+            try
+            {
+                var am = (ActivityManager)_context
+                    .GetSystemService(Context.ActivityService);
+                var memInfo = new ActivityManager.MemoryInfo();
+                am.GetMemoryInfo(memInfo);
+
+                long totalRam = memInfo.TotalMem;
+                long availRam = memInfo.AvailMem;
+                long usedRam = totalRam - availRam;
+                int usedPct = totalRam > 0
+                    ? (int)(usedRam * 100L / totalRam) : 0;
+                bool lowMem = memInfo.LowMemory;
+
+                string bar = StorageBar(usedPct);   // reuse same bar helper
+
+                return
+                    $"🧠 *RAM*\n\n" +
+                    $"Total:      {FormatBytes(totalRam)}\n" +
+                    $"Used:       {FormatBytes(usedRam)}  ({usedPct}%)\n" +
+                    $"Available:  {FormatBytes(availRam)}  ({100 - usedPct}%)\n\n" +
+                    $"`{bar}` {usedPct}%\n\n" +
+                    $"Low Memory: {(lowMem ? "⚠️ YES — system under pressure" : "✅ No")}\n" +
+                    $"🕐 Time:    {DateTime.Now:HH:mm:ss}";
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Memory error: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// /uptime — elapsed time since the last device reboot.
+        /// Computed from SystemClock.ElapsedRealtime() which counts ms since boot
+        /// including deep sleep — no permissions required.
+        /// </summary>
+        private string GetUptimeReport()
+        {
+            try
+            {
+                long elapsedMs = SystemClock.ElapsedRealtime();
+                long totalSec = elapsedMs / 1000;
+                long days = totalSec / 86400;
+                long hours = (totalSec % 86400) / 3600;
+                long minutes = (totalSec % 3600) / 60;
+                long seconds = totalSec % 60;
+
+                // Estimate the boot time (wall clock - uptime)
+                DateTime bootTime = DateTime.Now.AddMilliseconds(-elapsedMs);
+
+                // Human-readable uptime string
+                string uptime;
+                if (days > 0)
+                    uptime = $"{days}d {hours}h {minutes}m";
+                else if (hours > 0)
+                    uptime = $"{hours}h {minutes}m {seconds}s";
+                else
+                    uptime = $"{minutes}m {seconds}s";
+
+                return
+                    $"⏱ *Device Uptime*\n\n" +
+                    $"Running for: {uptime}\n" +
+                    $"Last reboot: {bootTime:yyyy-MM-dd HH:mm:ss}\n" +
+                    $"Now:         {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+            }
+            catch (Exception ex)
+            {
+                return $"❌ Uptime error: {ex.Message}";
+            }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // 🔋 Device Health — private helper utilities
+        // ═════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Converts BatteryStatus integer to a readable label.
+        /// Uses plain int comparison to stay compatible with C# 7.3.
+        /// </summary>
+        private static string BatteryStatusLabel(int code)
+        {
+            if (code == (int)BatteryStatus.Charging) return "⚡ Charging";
+            if (code == (int)BatteryStatus.Discharging) return "🔋 Discharging";
+            if (code == (int)BatteryStatus.Full) return "✅ Full";
+            if (code == (int)BatteryStatus.NotCharging) return "⏸ Not Charging";
+            return "❓ Unknown";
+        }
+
+        /// <summary>
+        /// Converts BatteryPlugged integer to a readable power source label.
+        /// 0 = unplugged, 1 = AC, 2 = USB, 4 = Wireless.
+        /// </summary>
+        private static string PluggedLabel(int code)
+        {
+            if (code == (int)BatteryPlugged.Ac) return "🔌 AC Adapter";
+            if (code == (int)BatteryPlugged.Usb) return "🔌 USB";
+            if (code == (int)BatteryPlugged.Wireless) return "📶 Wireless";
+            return "🔋 Unplugged";
+        }
+
+        /// <summary>
+        /// Converts BatteryHealth integer to a readable label.
+        /// </summary>
+        private static string BatteryHealthLabel(int code)
+        {
+            if (code == (int)BatteryHealth.Good) return "✅ Good";
+            if (code == (int)BatteryHealth.Overheat) return "🔥 Overheat";
+            if (code == (int)BatteryHealth.Dead) return "💀 Dead";
+            if (code == (int)BatteryHealth.OverVoltage) return "⚡ Over Voltage";
+            if (code == (int)BatteryHealth.Cold) return "🥶 Cold";
+            return "❓ Unknown";
+        }
+
+        /// <summary>
+        /// Returns a battery emoji based on current level and charging state.
+        /// </summary>
+        private static string BatteryEmoji(int pct, int statusCode)
+        {
+            // Show lightning bolt when charging regardless of level
+            if (statusCode == (int)BatteryStatus.Charging ||
+                statusCode == (int)BatteryStatus.Full)
+                return "⚡";
+
+            if (pct < 0) return "❓";
+            if (pct <= 10) return "🪫";
+            if (pct <= 30) return "🔋";
+            if (pct <= 70) return "🔋";
+            return "🔋";
+        }
+
+        /// <summary>
+        /// Builds a 10-character ASCII progress bar for a 0–100 fill value.
+        /// Example: fillPct=65 → [██████░░░░]
+        /// </summary>
+        private static string StorageBar(int fillPct)
+        {
+            const int barLen = 10;
+            int filled = (int)Math.Round(fillPct / 10.0);
+            filled = Math.Max(0, Math.Min(barLen, filled));
+            string full = new string('█', filled);
+            string empty = new string('░', barLen - filled);
+            return $"[{full}{empty}]";
+        }
+
+        /// <summary>
+        /// Converts a byte count to a human-readable string (KB / MB / GB).
+        /// </summary>
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 0) return "Unknown";
+            if (bytes < 1024L) return $"{bytes} B";
+            if (bytes < 1048576L) return $"{bytes / 1024.0:F1} KB";
+            if (bytes < 1073741824L) return $"{bytes / 1048576.0:F1} MB";
+            return $"{bytes / 1073741824.0:F2} GB";
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -1172,15 +1375,15 @@ namespace Finder.Droid.Managers
 
         private void BroadcastSendingPaused(bool paused)
         {
-            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            var editor = PreferenceManager
+                .GetDefaultSharedPreferences(_context).Edit();
             editor.PutBoolean(
                 BackgroundLocationService.PREF_KEY_SENDING_PAUSED_PUBLIC, paused);
             editor.Apply();
 
             try
             {
-                var intent = new Intent(
-                    BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
+                var intent = new Intent(BackgroundLocationService.ACTION_SET_SENDING_PAUSED);
                 intent.PutExtra("paused", paused);
                 _context.SendBroadcast(intent);
             }
@@ -1203,6 +1406,10 @@ namespace Finder.Droid.Managers
             catch { return false; }
         }
 
+        /// <summary>
+        /// Returns battery level as 0-100, or -1 if unavailable.
+        /// Used internally and by /status, /gpsstatus, and /location.
+        /// </summary>
         private int GetBatteryLevel()
         {
             try
@@ -1214,6 +1421,32 @@ namespace Finder.Droid.Managers
                 return scale > 0 ? (int)(level * 100f / scale) : -1;
             }
             catch { return -1; }
+        }
+
+        private string GetActiveGpsProvider()
+        {
+            try
+            {
+                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                return prefs.GetString(
+                    BackgroundLocationService.PREF_KEY_GPS_PROVIDER, "fused") ?? "fused";
+            }
+            catch { return "fused"; }
+        }
+
+        private void BroadcastGpsProvider(string provider)
+        {
+            var editor = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            editor.PutString(BackgroundLocationService.PREF_KEY_GPS_PROVIDER, provider);
+            editor.Apply();
+
+            try
+            {
+                var intent = new Intent(BackgroundLocationService.ACTION_SET_GPS_PROVIDER);
+                intent.PutExtra("provider", provider);
+                _context.SendBroadcast(intent);
+            }
+            catch { }
         }
 
         private void ShowEnableLocationNotification()
@@ -1248,6 +1481,42 @@ namespace Finder.Droid.Managers
         }
 
         // ─────────────────────────────────────────────────────────────────────
+        // Poll timer helpers
+        // ─────────────────────────────────────────────────────────────────────
+
+        private void RestartPollTimer(int intervalMs)
+        {
+            _pollTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            _pollTimer?.Dispose();
+            _pollTimer = new Timer(PollForCommands, null, 0, intervalMs);
+
+            var ed = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            ed.PutInt(PREF_POLL_INTERVAL_MS, intervalMs);
+            ed.Apply();
+        }
+
+        private bool IsPollingEnabled()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return prefs.GetBoolean(PREF_POLLING_ENABLED, true);
+        }
+
+        private void SetPollingEnabled(bool enabled)
+        {
+            var ed = PreferenceManager.GetDefaultSharedPreferences(_context).Edit();
+            ed.PutBoolean(PREF_POLLING_ENABLED, enabled);
+            ed.Apply();
+        }
+
+        private int GetSavedPollIntervalMs()
+        {
+            var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+            return Math.Max(
+                MIN_POLL_INTERVAL_MS,
+                prefs.GetInt(PREF_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS));
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
         // Telegram messaging
         // ─────────────────────────────────────────────────────────────────────
 
@@ -1262,6 +1531,68 @@ namespace Finder.Droid.Managers
                     $"&text={Uri.EscapeDataString(message)}" +
                     $"&parse_mode=Markdown";
                 await _httpClient.GetStringAsync(url);
+            }
+            catch { }
+        }
+
+        private async Task SendFileToTelegramAsync(
+            string filePath, string caption, AppSettings settings)
+        {
+            try
+            {
+                using var content = new MultipartFormDataContent();
+                using var fileStream = File.OpenRead(filePath);
+                using var fileContent = new System.Net.Http.StreamContent(fileStream);
+                fileContent.Headers.ContentType =
+                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                content.Add(fileContent, "document", Path.GetFileName(filePath));
+
+                string url =
+                    $"https://api.telegram.org/bot{settings.BotToken}" +
+                    $"/sendDocument?chat_id={settings.ChatId}" +
+                    $"&caption={Uri.EscapeDataString(caption)}";
+                await _httpClient.PostAsync(url, content);
+            }
+            catch { }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Startup message
+        // ─────────────────────────────────────────────────────────────────────
+
+        private async Task SendStartupMessageAsync()
+        {
+            try
+            {
+                if ((DateTime.Now - _lastStartupMessage).TotalSeconds < STARTUP_COOLDOWN_S)
+                    return;
+
+                var prefs = PreferenceManager.GetDefaultSharedPreferences(_context);
+                bool suppress = prefs.GetBoolean("suppress_next_startup_message", false);
+                if (suppress)
+                {
+                    var ed = prefs.Edit();
+                    ed.PutBoolean("suppress_next_startup_message", false);
+                    ed.Apply();
+                    return;
+                }
+
+                _lastStartupMessage = DateTime.Now;
+
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                var ver = assembly.GetName().Version;
+                string vs = $"{ver.Major}.{ver.Minor}.{ver.Build}";
+
+                int bat = GetBatteryLevel();
+                string batStr = bat >= 0 ? $"{bat}%" : "Unknown";
+
+                await SendTelegramMessageAsync(
+                    LoadSettings().BotToken,
+                    LoadSettings().ChatId,
+                    $"📡 *Finder v{vs} is running*\n" +
+                    $"Battery: {batStr}\n" +
+                    $"Time:    {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n" +
+                    "Send /cmd for all available commands.");
             }
             catch { }
         }
@@ -1289,124 +1620,46 @@ namespace Finder.Droid.Managers
         {
             try
             {
-                File.WriteAllText(_settingsFilePath,
-                    JsonConvert.SerializeObject(settings));
+                File.WriteAllText(
+                    _settingsFilePath,
+                    JsonConvert.SerializeObject(settings, Formatting.Indented));
             }
             catch { }
         }
 
         private static string MaskToken(string token)
         {
-            if (string.IsNullOrEmpty(token) || token.Length <= 8) return "***";
-            return token.Substring(0, 4) + "****" + token.Substring(token.Length - 4);
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Update notification helpers
-        // ─────────────────────────────────────────────────────────────────────
-
-        private void ShowUpdateProgressNotification(
-            string message, int progress, bool done)
-        {
-            try
-            {
-                var builder = new NotificationCompat.Builder(_context, UPDATE_CHANNEL_ID)
-                    .SetContentTitle("Finder Update")
-                    .SetContentText(message)
-                    .SetSmallIcon(done
-                        ? Android.Resource.Drawable.StatSysDownloadDone
-                        : Android.Resource.Drawable.StatSysDownload)
-                    .SetOngoing(!done)
-                    .SetAutoCancel(done)
-                    .SetOnlyAlertOnce(true);
-
-                if (!done)
-                    builder.SetProgress(100, progress, progress == 0);
-
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.Notify(UPDATE_NOTIFICATION_ID, builder.Build());
-            }
-            catch { }
-        }
-
-        private void CancelUpdateNotification()
-        {
-            try
-            {
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.Cancel(UPDATE_NOTIFICATION_ID);
-            }
-            catch { }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Notification channel setup
-        // ─────────────────────────────────────────────────────────────────────
-
-        private void CreateGpsAlertNotificationChannel()
-        {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
-            try
-            {
-                var channel = new NotificationChannel(
-                    GPS_ALERT_CHANNEL_ID, "GPS Alerts", NotificationImportance.High)
-                { Description = "Alerts for GPS state changes" };
-                channel.EnableVibration(true);
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.CreateNotificationChannel(channel);
-            }
-            catch { }
-        }
-
-        private void CreateUpdateNotificationChannel()
-        {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.O) return;
-            try
-            {
-                var channel = new NotificationChannel(
-                    UPDATE_CHANNEL_ID, "App Updates", NotificationImportance.Low)
-                { Description = "Shows APK download and install progress" };
-                channel.EnableVibration(false);
-                var nm = (NotificationManager)_context
-                    .GetSystemService(Context.NotificationService);
-                nm?.CreateNotificationChannel(channel);
-            }
-            catch { }
+            if (string.IsNullOrEmpty(token) || token.Length < 8)
+                return "***";
+            return token.Substring(0, 4) + "…" + token.Substring(token.Length - 4);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SingleShotLocationListener
-    // One-shot raw GPS listener used exclusively by the /location command.
-    // Implements DroidLocation.ILocationListener to avoid Gms namespace clash.
+    // Single-shot GPS location listener
+    // Used by /location to request a fresh fix when no cached fix is available.
     // ─────────────────────────────────────────────────────────────────────────
 
-    internal class SingleShotLocationListener
-        : Java.Lang.Object, DroidLocation.ILocationListener
+    internal class SingleShotLocationListener : Java.Lang.Object,
+        DroidLocation.ILocationListener
     {
-        private readonly Action<AndroidLocation> _onFix;
-        private bool _delivered = false;
+        private readonly Action<AndroidLocation> _callback;
+        private bool _fired;
 
-        public SingleShotLocationListener(Action<AndroidLocation> onFix)
-            => _onFix = onFix;
+        public SingleShotLocationListener(Action<AndroidLocation> callback)
+            => _callback = callback;
 
         public void OnLocationChanged(AndroidLocation location)
         {
-            if (_delivered) return;
-            _delivered = true;
-            _onFix?.Invoke(location);
+            if (_fired) return;
+            _fired = true;
+            _callback?.Invoke(location);
         }
 
         public void OnProviderDisabled(string provider) { }
         public void OnProviderEnabled(string provider) { }
-
-        public void OnStatusChanged(
-            string provider,
-            DroidLocation.Availability status,
-            Android.OS.Bundle extras)
+        public void OnStatusChanged(string provider,
+            DroidLocation.Availability status, Android.OS.Bundle extras)
         { }
     }
 }
