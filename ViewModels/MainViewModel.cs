@@ -130,6 +130,13 @@ namespace Finder.ViewModels
             {
                 await _locationService.StartTracking();
             }
+            catch (Exception ex)
+            {
+                if (Application.Current?.MainPage is not null)
+                {
+                    await Application.Current.MainPage.DisplayAlert("Couldn't start service", ex.Message, "OK");
+                }
+            }
             finally
             {
                 IsBusy = false;
@@ -143,6 +150,13 @@ namespace Finder.ViewModels
             try
             {
                 await _locationService.StopTracking();
+            }
+            catch (Exception ex)
+            {
+                if (Application.Current?.MainPage is not null)
+                {
+                    await Application.Current.MainPage.DisplayAlert("Couldn't stop service", ex.Message, "OK");
+                }
             }
             finally
             {

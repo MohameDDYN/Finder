@@ -15,7 +15,13 @@ namespace Finder.Platforms.Android.Services
     /// it if the process is killed, and layers on AlarmManager + immediate-restart
     /// fallbacks in OnTaskRemoved/OnDestroy for the cases Sticky alone doesn't
     /// reliably cover (recents swipe, aggressive OEM battery managers).
+    ///
+    /// The explicit Name below is required: without it, .NET-for-Android
+    /// generates a crc64-hash-prefixed Java class name by default, which won't
+    /// match the android:name declared in AndroidManifest.xml and causes a
+    /// ClassNotFoundException at runtime ("Unable to start service ... not found").
     /// </summary>
+    [Service(Name = "Finder.Platforms.Android.Services.BackgroundLocationService")]
     public class BackgroundLocationService : Service
     {
         public const string ChannelId = "finder_service";
