@@ -1,0 +1,62 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:viewmodels="clr-namespace:Finder.ViewModels"
+             x:Class="Finder.Views.MainPage"
+             x:DataType="viewmodels:MainViewModel"
+             Title="Finder">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="24" Spacing="20">
+
+            <Label Text="Finder" Style="{StaticResource Headline}" />
+            <Label Text="On-demand GPS locator" Style="{StaticResource SubHeadline}" />
+
+            <VerticalStackLayout Spacing="6">
+                <Label Text="Telegram Bot Token" />
+                <Entry Text="{Binding BotToken}"
+                       Placeholder="123456789:ABC-your-bot-token"
+                       IsPassword="True" />
+            </VerticalStackLayout>
+
+            <VerticalStackLayout Spacing="6">
+                <Label Text="Telegram Chat ID" />
+                <Entry Text="{Binding ChatId}"
+                       Placeholder="e.g. 987654321"
+                       Keyboard="Numeric" />
+            </VerticalStackLayout>
+
+            <Button Text="Save"
+                    Command="{Binding SaveCommand}"
+                    HorizontalOptions="Fill" />
+
+            <BoxView HeightRequest="1"
+                     Color="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray500}}"
+                     Margin="0,10" />
+
+            <HorizontalStackLayout Spacing="10" VerticalOptions="Center">
+                <Ellipse Fill="{Binding StatusColor}"
+                         WidthRequest="14"
+                         HeightRequest="14"
+                         VerticalOptions="Center" />
+                <Label Text="{Binding StatusText}"
+                       FontSize="16"
+                       VerticalOptions="Center" />
+                <ActivityIndicator IsRunning="{Binding IsBusy}"
+                                   IsVisible="{Binding IsBusy}"
+                                   VerticalOptions="Center" />
+            </HorizontalStackLayout>
+
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+                <Button Grid.Column="0"
+                        Text="Start"
+                        Command="{Binding StartServiceCommand}" />
+                <Button Grid.Column="1"
+                        Text="Stop"
+                        Command="{Binding StopServiceCommand}" />
+            </Grid>
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>
