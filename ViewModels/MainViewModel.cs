@@ -1,10 +1,11 @@
-﻿using Finder.Models;
+﻿using CommunityToolkit.Mvvm.Messaging;
+using Finder.Models;
 using Finder.Services;
 using Microsoft.Maui.Graphics;
 
 namespace Finder.ViewModels
 {
-    public class MainViewModel : ObservableObject, IDisposable
+    public class MainViewModel : ObservableObject, IDisposable, IRecipient<PermissionDeniedMessage>
     {
         private readonly ISettingsService _settingsService;
         private readonly ILocationService _locationService;
@@ -24,6 +25,23 @@ namespace Finder.ViewModels
             SaveCommand = new RelayCommand(SaveAsync, () => !IsBusy);
             StartServiceCommand = new RelayCommand(StartServiceAsync, () => !IsBusy && !_locationService.IsRunning);
             StopServiceCommand = new RelayCommand(StopServiceAsync, () => !IsBusy && _locationService.IsRunning);
+
+            WeakReferenceMessenger.Default.Register<PermissionDeniedMessage>(this);
+        }
+
+        public void Receive(PermissionDeniedMessage message)
+        {
+            MainThread.BeginInvokeOnMainThread(async () =>
+            {
+                if (Application.Current?.MainPage is not null)
+                {
+                    var detail = message.PermissionName == "Location"
+                        ? "Location permission was denied. GPS commands won't work until it's granted in Settings."
+                        : "Notification permission was denied. The background service can still run, but its status notification won't be visible.";
+
+                    await Application.Current.MainPage.DisplayAlert("Permission needed", detail, "OK");
+                }
+            });
         }
 
         public string BotToken
@@ -147,6 +165,10 @@ namespace Finder.ViewModels
             StopServiceCommand.RaiseCanExecuteChanged();
         }
 
-        public void Dispose() => OnDisappearing();
+        public void Dispose()
+        {
+            OnDisappearing();
+            WeakReferenceMessenger.Default.Unregister<PermissionDeniedMessage>(this);
+        }
     }
 }

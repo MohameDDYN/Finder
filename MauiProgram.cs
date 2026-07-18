@@ -21,9 +21,7 @@ namespace Finder
             builder.Services.AddSingleton<ISettingsService, SettingsService>();
 
 #if ANDROID
-            // Swap in once Platforms/Android/Services/LocationService.cs exists (Step 3):
-            // builder.Services.AddSingleton<ILocationService, Finder.Platforms.Android.Services.LocationService>();
-            builder.Services.AddSingleton<ILocationService, StubLocationService>();
+            builder.Services.AddSingleton<ILocationService, Finder.Platforms.Android.Services.LocationService>();
 #else
             builder.Services.AddSingleton<ILocationService, StubLocationService>();
 #endif
