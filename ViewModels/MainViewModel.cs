@@ -35,9 +35,12 @@ namespace Finder.ViewModels
             {
                 if (Application.Current?.MainPage is not null)
                 {
-                    var detail = message.PermissionName == "Location"
-                        ? "Location permission was denied. GPS commands won't work until it's granted in Settings."
-                        : "Notification permission was denied. The background service can still run, but its status notification won't be visible.";
+                    var detail = message.PermissionName switch
+                    {
+                        "Location" => "Location permission was denied. GPS commands won't work until it's granted in Settings.",
+                        "BackgroundLocation" => "\"Allow all the time\" location wasn't granted. Start/Stop still works, but the service won't be able to restart itself automatically after a reboot or app update. You can grant this later in Settings → Apps → Finder → Permissions → Location → Allow all the time.",
+                        _ => "Notification permission was denied. The background service can still run, but its status notification won't be visible."
+                    };
 
                     await Application.Current.MainPage.DisplayAlert("Permission needed", detail, "OK");
                 }

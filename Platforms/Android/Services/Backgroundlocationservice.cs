@@ -100,21 +100,32 @@ namespace Finder.Platforms.Android.Services
 
         private void ScheduleRestart()
         {
-            var context = AndroidApp.Context;
-            var restartIntent = new Intent(context, typeof(BackgroundLocationService));
+            try
+            {
+                var context = AndroidApp.Context;
+                var restartIntent = new Intent(context, typeof(BackgroundLocationService));
 
-            var flags = OperatingSystem.IsAndroidVersionAtLeast(23)
-                ? PendingIntentFlags.Immutable
-                : PendingIntentFlags.UpdateCurrent;
+                var flags = OperatingSystem.IsAndroidVersionAtLeast(23)
+                    ? PendingIntentFlags.Immutable
+                    : PendingIntentFlags.UpdateCurrent;
 
-            var pendingIntent = OperatingSystem.IsAndroidVersionAtLeast(26)
-                ? PendingIntent.GetForegroundService(context, 0, restartIntent, flags)
-                : PendingIntent.GetService(context, 0, restartIntent, flags);
+                var pendingIntent = OperatingSystem.IsAndroidVersionAtLeast(26)
+                    ? PendingIntent.GetForegroundService(context, 0, restartIntent, flags)
+                    : PendingIntent.GetService(context, 0, restartIntent, flags);
 
-            if (pendingIntent is null) return;
+                if (pendingIntent is null) return;
 
-            var alarmManager = context.GetSystemService(Context.AlarmService) as AlarmManager;
-            alarmManager?.Set(AlarmType.RtcWakeup, JavaSystem.CurrentTimeMillis() + 1000, pendingIntent);
+                var alarmManager = context.GetSystemService(Context.AlarmService) as AlarmManager;
+                alarmManager?.Set(AlarmType.RtcWakeup, JavaSystem.CurrentTimeMillis() + 1000, pendingIntent);
+            }
+            catch
+            {
+                // Never let a restart-scheduling failure crash OnDestroy — an
+                // unhandled exception here would crash the process, which
+                // triggers OnDestroy again on the next restart attempt, which
+                // could crash again: exactly the repeated-crash pattern behind
+                // Android's "app keeps stopping" dialog.
+            }
         }
 
         private void TryImmediateRestart()
