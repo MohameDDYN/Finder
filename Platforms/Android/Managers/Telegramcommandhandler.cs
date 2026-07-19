@@ -10,7 +10,6 @@ using Java.Lang;
 using AndroidLocation = Android.Locations.Location;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Devices;
 using Microsoft.Maui.Storage;
 
 namespace Finder.Platforms.Android.Managers
@@ -101,7 +100,7 @@ namespace Finder.Platforms.Android.Managers
                             {
                                 await HandleUpdateAsync(update);
                             }
-                            catch (System.Exception ex)  //deyenem
+                            catch (System.Exception ex) //deyenem
                             {
                                 // Surface handler errors back to Telegram instead of
                                 // failing completely silently — makes remote debugging
@@ -187,7 +186,7 @@ namespace Finder.Platforms.Android.Managers
 
             await SendLocationPinAsync(location.Latitude, location.Longitude);
 
-            var batteryPercent = (int)(Battery.ChargeLevel * 100);
+            var batteryPercent = GetBatteryPercent();
             var lat = location.Latitude.ToString("F6", CultureInfo.InvariantCulture);
             var lng = location.Longitude.ToString("F6", CultureInfo.InvariantCulture);
             var mapsLink = $"https://www.google.com/maps?q={lat},{lng}";
@@ -198,7 +197,7 @@ namespace Finder.Platforms.Android.Managers
                 $"Altitude: {(location.HasAltitude ? $"{location.Altitude:F1} m" : "n/a")}\n" +
                 $"Accuracy: {(location.HasAccuracy ? $"{location.Accuracy:F1} m" : "n/a")}\n" +
                 $"Speed: {(location.HasSpeed ? $"{location.Speed:F1} m/s" : "n/a")}\n" +
-                $"Battery: {batteryPercent}%\n" +
+                $"Battery: {(batteryPercent >= 0 ? $"{batteryPercent}%" : "n/a")}\n" +
                 $"Map: {mapsLink}";
 
             await SendMessageAsync(text);
@@ -335,17 +334,45 @@ namespace Finder.Platforms.Android.Managers
             "/location — get current GPS location\n" +
             "/update <version> <url> — remote update (coming soon)";
 
+        /// <summary>
+        /// Reads battery percentage via the ACTION_BATTERY_CHANGED sticky broadcast
+        /// instead of MAUI's Battery.ChargeLevel API. Some devices (notably certain
+        /// Samsung builds) throw a PermissionException for BATTERY_STATS from that
+        /// API's internal implementation — a system/signature permission ordinary
+        /// apps can never actually hold. This approach needs no permission at all.
+        /// </summary>
+        private int GetBatteryPercent()
+        {
+            try
+            {
+                var filter = new IntentFilter(Intent.ActionBatteryChanged);
+                var batteryStatus = _context.RegisterReceiver(null, filter);
+                if (batteryStatus is null) return -1;
+
+                var level = batteryStatus.GetIntExtra(BatteryManager.ExtraLevel, -1);
+                var scale = batteryStatus.GetIntExtra(BatteryManager.ExtraScale, -1);
+
+                if (level < 0 || scale <= 0) return -1;
+
+                return (int)(level * 100f / scale);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
         private string BuildStatusText()
         {
             var locationManager = _context.GetSystemService(Context.LocationService) as LocationManager;
             var gpsEnabled = locationManager?.IsProviderEnabled(LocationManager.GpsProvider) ?? false;
 
-            var batteryPercent = (int)(Battery.ChargeLevel * 100);
+            var batteryPercent = GetBatteryPercent();
 
             return "Status:\n" +
                    "Service: running\n" +
                    $"GPS enabled: {(gpsEnabled ? "yes" : "no")}\n" +
-                   $"Battery: {batteryPercent}%\n" +
+                   $"Battery: {(batteryPercent >= 0 ? $"{batteryPercent}%" : "n/a")}\n" +
                    $"App version: {AppInfo.Current.VersionString}\n" +
                    $"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
         }
